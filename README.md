@@ -26,6 +26,25 @@ on Windows. Built with Python, Qt (PySide6), an embedded **libmpv** player and *
 - **Library** of folders with episodes, project files (`.acsproj`), autosave, crash recovery (snapshots before
   heavy tasks, resumable export queue), dark / light theme, interface scaling, event trace for diagnostics.
 
+## Marking while watching in your own mpv
+
+Settings → External tools → *mpv.exe (optional)* → **Install marker script into mpv** copies
+[`acs_markers.lua`](src/acs/mpv/acs_markers.lua) into the scripts folder that your mpv reports itself
+(portable or `%APPDATA%\mpv` setups both work). Then, while watching in mpv:
+
+| Key | Action |
+|---|---|
+| Alt+M | marker at the current frame |
+| Alt+I / Alt+O | clip start / clip end |
+| Alt+Backspace | undo the last mark |
+| Alt+L | list the marks of this file |
+
+Marks are appended to `%APPDATA%\AnimeClipStudio\mpv-markers.jsonl` (or, with `store=sidecar` in
+`script-opts/acs_markers.conf`, to `<video>.acsmarks.jsonl`). When the same file is opened in the app it offers to
+**import** them (start/end pairs become clips) or **clear** them; File → *Import marks from mpv… / Clear mpv marks…*
+does the same on demand. Files are matched by full path, or by name + size if they were moved.
+Keys can be rebound in mpv's `input.conf`, e.g. `Ctrl+m script-binding acs_markers/acs-marker`.
+
 ## Requirements
 
 - Windows 10/11 x64

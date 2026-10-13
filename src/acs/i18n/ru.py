@@ -534,6 +534,85 @@ RU: dict[str, str] = {
     "Anime Clip Studio is already running. Two windows would overwrite each other's settings and autosaves.\n\nStart another window anyway?":
         "Anime Clip Studio уже запущен. Два окна перезаписывали бы друг другу настройки и автосохранения.\n\n"
         "Всё равно открыть ещё одно окно?",
+    # ---- marks from the stand-alone mpv ----
+    "optional": "необязательно",
+    "not set (optional)": "не указан (необязательно)",
+    "not found (optional)": "не найден (необязательно)",
+    "not a valid program": "это не программа",
+    "not an mpv player": "это не плеер mpv",
+    "Your stand-alone mpv player: lets you set markers while watching (see “Install marker script”).":
+        "Ваш отдельный плеер mpv: позволяет ставить метки прямо при просмотре (см. «Установить скрипт меток»).",
+    "Install marker script into mpv": "Установить скрипт меток в mpv",
+    "Copies acs_markers.lua into the scripts folder of the mpv above. Then, while watching in mpv: Alt+M marker, Alt+I / Alt+O clip start / end, Alt+Backspace undo, Alt+L list.":
+        "Копирует acs_markers.lua в папку скриптов указанного mpv. Затем при просмотре в mpv: Alt+M — метка, "
+        "Alt+I / Alt+O — начало / конец клипа, Alt+Backspace — отмена, Alt+L — список.",
+    "Choose a working mpv.exe first (or press Auto-detect).": "Сначала укажите рабочий mpv.exe (или нажмите «Найти автоматически»).",
+    "Could not install the script:": "Не удалось установить скрипт:",
+    "The marker script was installed:": "Скрипт меток установлен:",
+    "Restart mpv, then while watching:\n  Alt+M — marker\n  Alt+I / Alt+O — clip start / end\n  Alt+Backspace — undo the last mark\n  Alt+L — list marks\n\nWhen you open the same video in Anime Clip Studio it offers to import them.":
+        "Перезапустите mpv, затем при просмотре:\n  Alt+M — метка\n  Alt+I / Alt+O — начало / конец клипа\n"
+        "  Alt+Backspace — отменить последнюю отметку\n  Alt+L — список отметок\n\n"
+        "Когда вы откроете это видео в Anime Clip Studio, приложение предложит их импортировать.",
+    "Import marks from mpv…": "Импортировать метки из mpv…",
+    "Clear mpv marks for this video…": "Очистить метки mpv для этого видео…",
+    "No new marks from mpv for this video.": "Новых меток из mpv для этого видео нет.",
+    "Already imported:": "Уже импортировано:",
+    "Marks made in mpv were found for this video:": "Для этого видео найдены метки, сделанные в mpv:",
+    "{m} markers, {c} clips": "меток: {m}, клипов: {c}",
+    "{u} clip starts/ends without a pair (imported as markers)": "без пары начала/конца: {u} (будут импортированы как метки)",
+    "Import": "Импортировать",
+    "Import and clear in mpv": "Импортировать и очистить в mpv",
+    "Not now": "Не сейчас",
+    "Clear without importing": "Очистить без импорта",
+    "mpv marks for this video were cleared.": "Метки mpv для этого видео очищены.",
+    "Import marks from mpv": "Импорт меток из mpv",
+    "mpv start": "mpv начало",
+    "mpv end": "mpv конец",
+    "Imported from mpv:": "Импортировано из mpv:",
+    "No marks from mpv for this video.": "Меток из mpv для этого видео нет.",
+    "Delete {n} marks made in mpv for this video? Markers already imported into the project stay.":
+        "Удалить отметки mpv для этого видео ({n})? Уже импортированные в проект метки останутся.",
+    # ---- mpv script keys / import option ----
+    "Choose the keys, check them against mpv's own bindings and copy acs_markers.lua into the scripts folder of the mpv above.":
+        "Выбрать клавиши, проверить их по привязкам самого mpv и скопировать acs_markers.lua в папку скриптов указанного mpv.",
+    "Choose the keys you will press in mpv while watching. Click a field and press the key combination; Backspace inside an empty field clears it.":
+        "Выберите клавиши, которые будете нажимать в mpv при просмотре. Щёлкните поле и нажмите сочетание; "
+        "кнопка ✕ в поле очищает его.",
+    "mpv:": "mpv:",
+    "Undo the last mark": "Отменить последнюю отметку",
+    "List marks": "Список отметок",
+    "The key name as mpv writes it": "Имя клавиши в формате mpv",
+    "Default": "По умолчанию",
+    "Check keys": "Проверить клавиши",
+    "Install": "Установить",
+    "(no key — only via input.conf)": "(без клавиши — только через input.conf)",
+    "your input.conf": "ваш input.conf",
+    "mpv built-in": "встроенная клавиша mpv",
+    "script": "скрипт",
+    "this script": "этот скрипт",
+    "also chosen for": "также выбрана для",
+    "Could not ask this mpv for its scripts folder.": "Не удалось узнать у этого mpv папку скриптов.",
+    "All keys are free in this mpv.": "Все клавиши в этом mpv свободны.",
+    "Scripts folder:": "Папка скриптов:",
+    "Some keys are already used in mpv:": "Некоторые клавиши уже заняты в mpv:",
+    "Choose at least one key.": "Выберите хотя бы одну клавишу.",
+    "Install anyway": "Всё равно установить",
+    "Change keys": "Изменить клавиши",
+    "Restart mpv, then while watching:": "Перезапустите mpv, затем при просмотре:",
+    "When you open the same video in Anime Clip Studio it offers to import them.":
+        "Когда вы откроете это видео в Anime Clip Studio, приложение предложит импортировать отметки.",
+    "Your input.conf binding wins — this marker key will NOT work in mpv.":
+        "Ваша привязка из input.conf приоритетнее — эта клавиша меток в mpv работать НЕ будет.",
+    "The marker script takes over this key — mpv's built-in action will no longer be available on it.":
+        "Скрипт меток перехватит эту клавишу — встроенное действие mpv на ней станет недоступно.",
+    "Another script uses this key — only one of the two will react.":
+        "Эту клавишу использует другой скрипт — сработает только один из двух.",
+    "The same key is chosen for two marker actions — only one of them will work.":
+        "Одна и та же клавиша выбрана для двух действий — сработает только одно.",
+    "{n} marks imported earlier are skipped (no duplicates).": "Уже импортированные ранее отметки пропущены, чтобы не было дублей: {n}.",
+    "Don't offer marks from this video again": "Больше не предлагать метки из этого видео",
+    "They can still be imported later via File → Import marks from mpv…":
+        "Их всё равно можно импортировать позже через Файл → Импортировать метки из mpv…",
     # ---- external tools ----
     "External tools": "Внешние программы",
     "External tools…": "Внешние программы…",

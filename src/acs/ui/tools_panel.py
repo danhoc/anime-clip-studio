@@ -4,17 +4,20 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFileDialog, QGridLayout, QGroupBox,
-                               QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget)
+                               QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 from acs.core import trace
 from acs.core.settings import app_root
-from acs.core.tools import OFFICIAL_LINKS, WINGET_FFMPEG, ToolStatus, check_ff, check_libmpv, detect
+from acs.core.tools import (OFFICIAL_LINKS, WINGET_FFMPEG, ToolStatus, check_ff, check_libmpv, check_mpv_player,
+                            detect, detect_mpv_player)
 from acs.ui import theme
 from acs.i18n import tr
 
 KINDS = (("ffmpeg", "ffmpeg.exe", "ffmpeg (*.exe)"),
          ("ffprobe", "ffprobe.exe", "ffprobe (*.exe)"),
-         ("libmpv", "libmpv-2.dll", "libmpv (libmpv-2.dll mpv-2.dll)"))
+         ("libmpv", "libmpv-2.dll", "libmpv (libmpv-2.dll mpv-2.dll)"),
+         ("mpv_player", "mpv.exe", "mpv (mpv.exe)"))
+REQUIRED = ("ffmpeg", "ffprobe", "libmpv")
 
 
 class ToolsPanel(QWidget):
@@ -28,7 +31,11 @@ class ToolsPanel(QWidget):
         self.edits: dict[str, QLineEdit] = {}
         self.labels: dict[str, QLabel] = {}
         for row, (kind, title, filt) in enumerate(KINDS):
-            grid.addWidget(QLabel(title), row * 2, 0)
+            label = QLabel(title if kind in REQUIRED else f"{title}\n({tr('optional')})")
+            if kind == "mpv_player":
+                label.setToolTip(tr("Your stand-alone mpv player: lets you set markers while watching "
+                                    "(see “Install marker script”)."))
+            grid.addWidget(label, row * 2, 0)
             le = QLineEdit(getattr(settings, kind))
             le.editingFinished.connect(lambda k=kind: self.validate(k))
             b = QPushButton("…")
@@ -53,6 +60,11 @@ class ToolsPanel(QWidget):
         self.b_detect.clicked.connect(self.auto_detect)
         row.addWidget(self.b_detect)
         row.addStretch(1)
+        self.b_install = QPushButton(tr("Install marker script into mpv"))
+        self.b_install.setToolTip(tr("Choose the keys, check them against mpv's own bindings and copy "
+                                     "acs_markers.lua into the scripts folder of the mpv above."))
+        self.b_install.clicked.connect(self.install_script)
+        row.addWidget(self.b_install)
         lay.addLayout(row)
 
         self.help = QGroupBox(tr("Where to get them (official sources)"))
@@ -92,17 +104,30 @@ class ToolsPanel(QWidget):
         path = self.edits[kind].text().strip()
         if kind == "libmpv":
             st = check_libmpv(path)
+        elif kind == "mpv_player":
+            st = check_mpv_player(path) if (path or not quick) else ToolStatus("mpv", "", error="not set (optional)")
         else:
             st = check_ff(path, kind, with_features=not quick)
         self.status[kind] = st
         self._show(kind, st)
         return st
 
+    def install_script(self) -> None:
+        st = self.validate("mpv_player")
+        if not st.ok:
+            QMessageBox.warning(self, tr("External tools"), tr("Choose a working mpv.exe first (or press Auto-detect)."))
+            return
+        from acs.ui.mpv_script_dialog import MpvScriptDialog
+        MpvScriptDialog(self.settings, st.path, self).exec()
+
     def auto_detect(self) -> None:
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             for kind, _t, _f in KINDS:
-                st = detect(kind, self.edits[kind].text().strip(), app_root())
+                if kind == "mpv_player":
+                    st = detect_mpv_player(self.edits[kind].text().strip(), app_root())
+                else:
+                    st = detect(kind, self.edits[kind].text().strip(), app_root())
                 self.status[kind] = st
                 if st.ok:
                     self.edits[kind].setText(st.path)
@@ -120,9 +145,13 @@ class ToolsPanel(QWidget):
             if missing:
                 text += ("<br><span style='color:#e0b341'>⚠ " + tr("this build lacks:") + " "
                          + ", ".join(missing) + " — " + tr("the matching presets will fail") + "</span>")
+        elif kind not in REQUIRED:
+            text = f"<span style='{theme.css_dim()}'>– {tr(st.error or 'not set (optional)')}</span>"
         else:
             text = f"<span style='color:#ff6b6b'>✖ {tr(st.error or 'not found')}</span>"
         self.labels[kind].setText(text)
+        if kind == "mpv_player":
+            self.b_install.setEnabled(st.ok)
         self._update_links()
 
     def _update_links(self) -> None:
@@ -139,7 +168,7 @@ class ToolsPanel(QWidget):
         self.links.setText("".join(parts) if parts else tr("All tools are in place."))
 
     def all_ok(self) -> bool:
-        return all(self.status.get(k, ToolStatus(k)).ok for k, _t, _f in KINDS)
+        return all(self.status.get(k, ToolStatus(k)).ok for k in REQUIRED)
 
     def apply(self) -> bool:
         """Write paths to settings. Returns True if the libmpv path changed (restart needed)."""
@@ -147,6 +176,7 @@ class ToolsPanel(QWidget):
         self.settings.ffmpeg = self.edits["ffmpeg"].text().strip()
         self.settings.ffprobe = self.edits["ffprobe"].text().strip()
         self.settings.libmpv = self.edits["libmpv"].text().strip()
+        self.settings.mpv_player = self.edits["mpv_player"].text().strip()
         return self.settings.libmpv != old_mpv
 
 

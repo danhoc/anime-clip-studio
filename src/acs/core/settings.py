@@ -83,6 +83,8 @@ class AppSettings:
     ffmpeg: str = ""
     ffprobe: str = ""
     libmpv: str = ""
+    mpv_player: str = ""            # optional stand-alone mpv.exe (marking while watching)
+    mpv_script_keys: dict = field(default_factory=dict)   # action -> mpv key name for acs_markers.lua
     output_dir: str = ""
     language: str = "en"
     ui_scale: str = "auto"          # auto | 1.0 | 1.25 | 1.5 | 1.75 | 2.0 (applied at start)

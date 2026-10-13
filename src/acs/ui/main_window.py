@@ -9,13 +9,14 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout, QLabel,
+from PySide6.QtGui import QAction, QFont, QFontMetrics, QKeySequence
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout,
+                               QLabel,
                                QMainWindow, QMessageBox, QPushButton, QScrollArea, QSlider, QSplitter,
                                QStackedWidget, QStyle, QToolButton, QUndoView, QVBoxLayout, QWidget)
 
 from acs import APP_TITLE, __version__
-from acs.core import recovery, trace
+from acs.core import mpv_markers, recovery, trace
 from acs.core.atomic import read_json
 from acs.core.clipinfo import effective_audio, effective_sub, pick_sub_track, pick_track
 from acs.core.cropdetect import detect_crop
@@ -162,6 +163,16 @@ class MainWindow(QMainWindow):
         bl.addWidget(self.l_time)
         bl.addSpacing(6)
         bl.addWidget(self.l_frame)
+        # Fixed widths so the buttons on the right never move while the text changes
+        # (e.g. when " K" appears on keyframes or the frame number gains a digit).
+        mono_font = QFont()
+        mono_font.setFamilies(["Consolas", "Cascadia Mono", "Courier New"])
+        mono_font.setPixelSize(17)
+        fm = QFontMetrics(mono_font)
+        self.l_time.setFixedWidth(fm.horizontalAdvance("00:00:00.000 | 000/000  /  00:00:00") + 6)
+        self.l_frame.setFixedWidth(fm.horizontalAdvance("#00000000 K") + 6)
+        for lab in (self.l_time, self.l_frame):
+            lab.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         bl.addSpacing(16)
         self.b_in = tb("[  " + tr("Clip start") + "  I", "Set clip In (starts a new clip)", "set_in",
                        bold=True, name="mark_in")
@@ -345,6 +356,9 @@ class MainWindow(QMainWindow):
         m_file.addSeparator()
         self._act(m_file, "export", "Export clips…", self.export_clips)
         self._act(m_file, "frames", "Extract frames…", lambda: self.extract_frames(None))
+        m_file.addSeparator()
+        self._act(m_file, "", "Import marks from mpv…", lambda: self.offer_mpv_import(auto=False))
+        self._act(m_file, "", "Clear mpv marks for this video…", self.clear_mpv_marks)
         m_file.addSeparator()
         self._act(m_file, "", "Exit", self.close)
 
@@ -620,6 +634,7 @@ class MainWindow(QMainWindow):
         self._update_labels()
         self._start_background(token, path, info, aid)
         trace.log("open", "open_video done")
+        QTimer.singleShot(400, lambda tok=token: self.offer_mpv_import(auto=True) if tok == self._token else None)
 
     @staticmethod
     def _thread(name: str, fn) -> None:
@@ -1029,6 +1044,100 @@ class MainWindow(QMainWindow):
     # =========================================================================================
     # Export / frames
     # =========================================================================================
+    # =========================================================================================
+    # Marks made in the stand-alone mpv player (acs_markers.lua)
+    # =========================================================================================
+    def offer_mpv_import(self, auto: bool) -> None:
+        if not self.doc.has_video:
+            return
+        path = self.doc.project.video.path
+        try:
+            marks = mpv_markers.read_marks(path)
+        except OSError as e:
+            log.warning("cannot read mpv marks: %s", e)
+            return
+        project = self.doc.project
+        if auto and project.mpv_offer_disabled:
+            trace.log("mpv-marks", "auto offer disabled for this video")
+            return
+        seen = set(project.mpv_seen_ids)
+        new = [m for m in marks if m.id not in seen]
+        already = len(marks) - len(new)
+        trace.log("mpv-marks", f"{len(marks)} marks for this video, {len(new)} new (auto={auto})")
+        if not new:
+            if not auto:
+                QMessageBox.information(self, APP_TITLE, tr("No new marks from mpv for this video.")
+                                        + (("\n" + tr("Already imported:") + f" {already}") if already else ""))
+                if project.mpv_offer_disabled:
+                    project.mpv_offer_disabled = False
+                    self.doc._changed()
+            return
+        markers, clips, unpaired = mpv_markers.split_marks(new)
+        text = tr("Marks made in mpv were found for this video:") + "\n\n" + \
+            tr("{m} markers, {c} clips").format(m=len(markers), c=len(clips))
+        if unpaired:
+            text += "\n" + tr("{u} clip starts/ends without a pair (imported as markers)").format(u=len(unpaired))
+        if already:
+            text += "\n" + tr("{n} marks imported earlier are skipped (no duplicates).").format(n=already)
+        box = QMessageBox(QMessageBox.Icon.Question, APP_TITLE, text, parent=self)
+        b_import = box.addButton(tr("Import"), QMessageBox.ButtonRole.AcceptRole)
+        b_import_clear = box.addButton(tr("Import and clear in mpv"), QMessageBox.ButtonRole.AcceptRole)
+        b_later = box.addButton(tr("Not now"), QMessageBox.ButtonRole.RejectRole)
+        b_clear = box.addButton(tr("Clear without importing"), QMessageBox.ButtonRole.DestructiveRole)
+        never = QCheckBox(tr("Don't offer marks from this video again"))
+        never.setToolTip(tr("They can still be imported later via File → Import marks from mpv…"))
+        never.setChecked(project.mpv_offer_disabled)
+        box.setCheckBox(never)
+        box.setDefaultButton(b_import)
+        box.exec()
+        clicked = box.clickedButton()
+        if never.isChecked() != project.mpv_offer_disabled:
+            project.mpv_offer_disabled = never.isChecked()
+            trace.log("mpv-marks", f"offer disabled for this video: {project.mpv_offer_disabled}")
+            self.doc._changed()
+        if clicked in (b_import, b_import_clear):
+            self._import_mpv_marks(markers, clips, unpaired)
+            project.mpv_seen_ids = sorted(seen | {m.id for m in new})  # never import the same mark twice
+            self.doc._changed()
+        if clicked in (b_import_clear, b_clear):
+            removed = mpv_markers.clear_marks(path)
+            trace.log("mpv-marks", f"cleared {removed} records")
+            self.statusBar().showMessage(tr("mpv marks for this video were cleared."), 5000)
+
+    def _import_mpv_marks(self, markers, clips, unpaired) -> None:
+        doc = self.doc
+        doc.undo.beginMacro(tr("Import marks from mpv"))
+        try:
+            for m in markers:
+                doc.add_marker(doc.frame_at(m.time), label="mpv")
+            for m in unpaired:
+                doc.add_marker(doc.frame_at(m.time), label=tr("mpv start") if m.kind == "in" else tr("mpv end"))
+            for a, b in clips:
+                in_f = doc.frame_at(a.time)
+                out_f = min(doc.frame_at(b.time) + 1, doc.frame_count)  # the marked frame is included
+                if out_f > in_f:
+                    doc.add_clip(in_f, out_f)
+        finally:
+            doc.undo.endMacro()
+        trace.log("mpv-marks", f"imported {len(markers)} markers, {len(clips)} clips, {len(unpaired)} unpaired")
+        self.statusBar().showMessage(tr("Imported from mpv:") + " " +
+                                     tr("{m} markers, {c} clips").format(m=len(markers) + len(unpaired),
+                                                                         c=len(clips)), 6000)
+
+    def clear_mpv_marks(self) -> None:
+        if not self.doc.has_video:
+            return
+        path = self.doc.project.video.path
+        n = len(mpv_markers.read_marks(path))
+        if n == 0:
+            QMessageBox.information(self, APP_TITLE, tr("No marks from mpv for this video."))
+            return
+        r = QMessageBox.question(self, APP_TITLE, tr("Delete {n} marks made in mpv for this video? "
+                                                    "Markers already imported into the project stay.").format(n=n))
+        if r == QMessageBox.StandardButton.Yes:
+            mpv_markers.clear_marks(path)
+            self.statusBar().showMessage(tr("mpv marks for this video were cleared."), 5000)
+
     def export_clips(self) -> None:
         if not self.doc.has_video:
             return

@@ -26,8 +26,10 @@ LANE_H = 26
 LANE_GAP = 4
 # Thumbnail and waveform rows share the height left after the ruler and the clip lanes.
 THUMB_MIN, THUMB_MAX = 40, 150
-WAVE_MIN, WAVE_MAX = 28, 110
-THUMB_SHARE = 0.6
+WAVE_MIN = 48                   # the waveform row takes all remaining height (no upper limit)
+THUMB_SHARE = 0.5
+WAVE_REF_PERCENTILE = 99.5      # auto gain: this loudness level reaches the top of the row
+WAVE_HEADROOM = 0.92
 EDGE_PX = 6
 SNAP_PX = 8
 MAX_PX_PER_FRAME = 48
@@ -125,6 +127,12 @@ class Timeline(QWidget):
     def set_waveform(self, peaks: np.ndarray | None, bps: int = DEFAULT_BPS) -> None:
         self.wave = peaks
         self.wave_bps = bps
+        # Auto gain: downmixed 5.1 / quiet masters otherwise use only a fraction of the row.
+        if peaks is not None and len(peaks):
+            ref = float(np.percentile(peaks, WAVE_REF_PERCENTILE))
+            self.wave_ref = max(8.0, ref)
+        else:
+            self.wave_ref = 255.0
         self.update()
 
     def set_position(self, t: float, follow: bool = False) -> None:
@@ -226,7 +234,7 @@ class Timeline(QWidget):
         """(thumbnail height, waveform height) filling the space the clip lanes leave free."""
         free = max(0, self.height() - RULER_H - self._lanes_h - 8)
         th = int(min(THUMB_MAX, max(THUMB_MIN, free * THUMB_SHARE)))
-        wh = int(min(WAVE_MAX, max(WAVE_MIN, free - th)))
+        wh = int(max(WAVE_MIN, free - th))   # everything left goes to the waveform
         return th, wh
 
     @property
@@ -391,17 +399,19 @@ class Timeline(QWidget):
         x0, x1 = max(0, r.left() - 2), min(self.width(), r.right() + 3)
         step = 1.0 / max(1.0, self.devicePixelRatioF())     # one sample per *device* pixel
         xs, vals = self.wave_envelope(x0, x1, step)
-        mid = y + h / 2
-        amp = vals * ((h / 2 - 1) / 255)
-        top = [QPointF(x, mid - a) for x, a in zip(xs, amp)]
-        bottom = [QPointF(x, mid + a) for x, a in zip(xs[::-1], amp[::-1])]
-        poly = QPolygonF(top + bottom)
+        # The waveform is symmetric, so only its upper half is drawn, rising from the bottom edge:
+        # the full row height becomes amplitude (twice the detail of a mirrored drawing).
+        base = y + h - 1
+        gain = WAVE_HEADROOM / getattr(self, "wave_ref", 255.0)
+        amp = np.clip(vals * gain, 0.0, 1.0) * (h - 3)
+        top = [QPointF(x, base - a) for x, a in zip(xs, amp)]
+        poly = QPolygonF(top + [QPointF(xs[-1], base), QPointF(xs[0], base)])
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(C_WAVE)
         p.drawPolygon(poly)
-        p.setPen(QPen(C_WAVE.darker(140) if theme.current().name == "light" else C_WAVE.lighter(130), 0.6))
-        p.drawLine(QPointF(x0, mid), QPointF(x1, mid))
+        p.setPen(QPen(C_WAVE.darker(140) if theme.current().name == "light" else C_WAVE.lighter(130), 0.8))
+        p.drawLine(QPointF(x0, base), QPointF(x1, base))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 

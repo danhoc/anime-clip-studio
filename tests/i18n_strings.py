@@ -33,12 +33,18 @@ def table_strings() -> set[str]:
     from acs.ui.recovery_dialog import REASONS
 
     from acs.core.model import MARKER_COLOR_NAMES
+    from acs.core.mpv_keys import ACTIONS, Conflict
+    from acs.ui.mpv_script_dialog import KIND_TITLE
     from acs.core.tools import OFFICIAL_LINKS
 
     s: set[str] = set(MARKER_COLOR_NAMES) | {"Edit marker"}
+    s.update(title for _o, _d, title in ACTIONS.values())
+    s.update(KIND_TITLE.values())
+    s.update(Conflict("marker", "", k, "", "").consequence() for k in ("input_conf", "builtin", "script", "duplicate"))
     for links in OFFICIAL_LINKS.values():
         s.update(text for text, _url in links)
-    s.update(["file not found", "not found", "not a valid DLL", "not a 64-bit DLL (the app is 64-bit)"])
+    s.update(["file not found", "not found", "not a valid DLL", "not a 64-bit DLL (the app is 64-bit)",
+              "not set (optional)", "not found (optional)", "not a valid program", "not an mpv player"])
     for d in (texts.REASONS, texts.WARNINGS, texts.MODES, texts.STATUS, CODEC_HELP, REASONS):
         s.update(d.values())
     for _a, _k, text, group in HOTKEYS:

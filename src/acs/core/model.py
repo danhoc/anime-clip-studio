@@ -103,6 +103,8 @@ class Project:
     view: ViewState = field(default_factory=ViewState)
     presets_snapshot: dict[str, dict] = field(default_factory=dict)
     marker_color_index: int = 0
+    mpv_seen_ids: list[str] = field(default_factory=list)   # mpv marks already imported (never duplicated)
+    mpv_offer_disabled: bool = False                          # "don't offer marks from this video again"
     version: int = PROJECT_SCHEMA_VERSION
 
     # ---- lookup helpers -----------------------------------------------------------------
@@ -156,5 +158,7 @@ class Project:
             view=ViewState(**pick(ViewState, d.get("view"))),
             presets_snapshot=d.get("presets_snapshot", {}) or {},
             marker_color_index=int(d.get("marker_color_index", len(d.get("markers", [])))),
+            mpv_seen_ids=[str(x) for x in d.get("mpv_seen_ids", []) or []],
+            mpv_offer_disabled=bool(d.get("mpv_offer_disabled", False)),
             version=int(d.get("version", PROJECT_SCHEMA_VERSION)),
         )
