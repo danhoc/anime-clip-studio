@@ -24,12 +24,17 @@ from acs.ui import theme
 RULER_H = 26
 LANE_H = 26
 LANE_GAP = 4
-# Thumbnail and waveform rows share the height left after the ruler and the clip lanes.
-THUMB_MIN, THUMB_MAX = 40, 150
-WAVE_MIN = 48                   # the waveform row takes all remaining height (no upper limit)
-THUMB_SHARE = 0.5
-WAVE_REF_PERCENTILE = 99.5      # auto gain: this loudness level reaches the top of the row
-WAVE_HEADROOM = 0.92
+# Fixed row heights (logical px) chosen once from the screen height — the timeline does not stretch
+# with the window, so resizing panels never re-scales hundreds of thumbnails or the waveform.
+ROW_SIZES = (  # (min logical screen height, thumbnail row, waveform row)
+    (1300, 120, 96),
+    (1000, 100, 80),
+    (0, 76, 60),
+)
+THUMB_MIN, THUMB_MAX = 40, 150   # kept for quality heuristics (core/uiscale.py)
+DEFAULT_LANES = 3                # clip lanes always reserved (more appear when clips overlap)
+WAVE_REF_PERCENTILE = 99.97     # auto gain reference: (almost) the loudest moment of the track
+WAVE_KNEE = 0.85                 # above this, peaks are compressed smoothly instead of clipped
 EDGE_PX = 6
 SNAP_PX = 8
 MAX_PX_PER_FRAME = 48
@@ -74,7 +79,7 @@ class Timeline(QWidget):
         self.doc = doc
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setMinimumHeight(RULER_H + THUMB_MIN + WAVE_MIN + 2 * (LANE_H + LANE_GAP) + 12)
+        self._row_sizes = ROW_SIZES[1][1:]
         self.position = 0.0
         self.thumb_times: np.ndarray | None = None
         self.thumb_source: list[QImage] = []   # as decoded (72 px tall)
@@ -223,19 +228,34 @@ class Timeline(QWidget):
                 lanes_end.append(end)
                 self._lanes[c.id] = len(lanes_end) - 1
         self._lane_count = max(1, len(lanes_end))
-        self.setMinimumHeight(RULER_H + THUMB_MIN + WAVE_MIN + self._lanes_h + 8)
-        self.update()
+        self.update()  # height never changes: extra lanes are squeezed into the fixed lane area
+
+    def configure_for_screen(self, logical_screen_height: int) -> None:
+        """Pick fixed row heights for this display (called once by the main window)."""
+        for min_h, th, wh in ROW_SIZES:
+            if logical_screen_height >= min_h:
+                self._row_sizes = (th, wh)
+                break
+        self._apply_fixed_height()
+
+    def _apply_fixed_height(self) -> None:
+        th, wh = self._rows()
+        self.setFixedHeight(RULER_H + th + wh + 6 + self._lanes_h + 4)
 
     @property
     def _lanes_h(self) -> int:
-        return max(2, self._lane_count + 1) * (LANE_H + LANE_GAP)  # one spare lane for new clips
+        """Fixed height of the clip-lane area (room for DEFAULT_LANES full-size lanes)."""
+        return DEFAULT_LANES * (LANE_H + LANE_GAP)
+
+    def _lane_geom(self) -> tuple[float, float]:
+        """(lane pitch, lane height): full size while the lanes fit, squeezed when clips overlap more."""
+        pitch = min(float(LANE_H + LANE_GAP), self._lanes_h / max(1, self._lane_count))
+        height = max(6.0, pitch - min(LANE_GAP, pitch * 0.15))
+        return pitch, height
 
     def _rows(self) -> tuple[int, int]:
-        """(thumbnail height, waveform height) filling the space the clip lanes leave free."""
-        free = max(0, self.height() - RULER_H - self._lanes_h - 8)
-        th = int(min(THUMB_MAX, max(THUMB_MIN, free * THUMB_SHARE)))
-        wh = int(max(WAVE_MIN, free - th))   # everything left goes to the waveform
-        return th, wh
+        """(thumbnail height, waveform height) — fixed, independent of the widget height."""
+        return getattr(self, "_row_sizes", ROW_SIZES[1][1:])
 
     @property
     def _thumbs_y(self) -> int:
@@ -257,8 +277,9 @@ class Timeline(QWidget):
         else:
             x1 = self.t2x(self.doc.time_of(c.out_frame))
         lane = self._lanes.get(c.id, 0)
-        y = self._clips_y + lane * (LANE_H + LANE_GAP)
-        return QRectF(x0, y, max(2.0, x1 - x0), LANE_H)
+        pitch, height = self._lane_geom()
+        y = self._clips_y + lane * pitch
+        return QRectF(x0, y, max(2.0, x1 - x0), height)
 
     # ---- painting ------------------------------------------------------------------------
     def paintEvent(self, ev):
@@ -402,8 +423,12 @@ class Timeline(QWidget):
         # The waveform is symmetric, so only its upper half is drawn, rising from the bottom edge:
         # the full row height becomes amplitude (twice the detail of a mirrored drawing).
         base = y + h - 1
-        gain = WAVE_HEADROOM / getattr(self, "wave_ref", 255.0)
-        amp = np.clip(vals * gain, 0.0, 1.0) * (h - 3)
+        x = vals / getattr(self, "wave_ref", 255.0)
+        # linear up to the knee, then a smooth tanh shoulder that approaches (never hits) the top:
+        # loud passages keep their shape instead of turning into a flat clipped band
+        k = WAVE_KNEE
+        y = np.where(x < k, x, k + (1 - k) * np.tanh((x - k) / (1 - k)))
+        amp = np.clip(y, 0.0, 1.0) * (h - 3)
         top = [QPointF(x, base - a) for x, a in zip(xs, amp)]
         poly = QPolygonF(top + [QPointF(xs[-1], base), QPointF(xs[0], base)])
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
