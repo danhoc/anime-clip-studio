@@ -1,0 +1,27 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Third-party binaries are not committed (licensing + GitHub's 100 MB file limit).
+# Put ffmpeg.exe / ffprobe.exe / libmpv-2.dll here locally, or let the app find them.
+vendor/*
+!vendor/README.md
+
+# Local data / outputs
+*.acsproj.bak
+*.part.*
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
