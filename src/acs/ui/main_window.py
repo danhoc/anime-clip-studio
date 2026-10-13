@@ -11,8 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QByteArray, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QFontMetrics, QKeySequence
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout,
-                               QLabel, QLayout,
-                               QMainWindow, QMessageBox, QPushButton, QScrollArea, QSlider, QSplitter,
+                               QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSlider, QSplitter,
                                QStackedWidget, QStyle, QToolButton, QUndoView, QVBoxLayout, QWidget)
 
 from acs import APP_TITLE, __version__
@@ -232,8 +231,6 @@ class MainWindow(QMainWindow):
             self.timeline.configure_for_screen(screen.availableGeometry().height())
         tlw = QWidget()
         tll = QVBoxLayout(tlw)
-        # min = max = content height: the splitter cannot stretch the timeline (fixed rows, no lag)
-        tll.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
         tll.setContentsMargins(0, 0, 0, 0)
         tll.setSpacing(0)
         zb = QHBoxLayout()
@@ -273,22 +270,19 @@ class MainWindow(QMainWindow):
         self.top_split.setStretchFactor(1, 1)
         self.top_split.setCollapsible(0, False)
 
-        # The timeline has a fixed height, so it sits directly on top of the clip panel (no splitter
-        # handle between them); only the border between the player and this block is movable.
-        bottom = QWidget()
-        bl2 = QVBoxLayout(bottom)
-        bl2.setContentsMargins(0, 0, 0, 0)
-        bl2.setSpacing(0)
-        bl2.addWidget(tlw)
-        bl2.addWidget(self.clip_panel, 1)
+        # Player / timeline / clip table. The timeline's thumbnail and waveform rows have a fixed
+        # height and sit right under the transport bar; dragging the handle below the timeline only
+        # grows or shrinks its clip-lane area, so no empty gap can open between video and timeline.
         self.clip_panel.setMinimumHeight(140)
         self.split = QSplitter(Qt.Orientation.Vertical)
         self.split.addWidget(self.top_split)
-        self.split.addWidget(bottom)
+        self.split.addWidget(tlw)
+        self.split.addWidget(self.clip_panel)
         self.split.setStretchFactor(0, 3)
-        self.split.setStretchFactor(1, 1)
-        self.split.setCollapsible(0, False)
-        self.split.setCollapsible(1, False)
+        self.split.setStretchFactor(1, 0)
+        self.split.setStretchFactor(2, 1)
+        for i in range(3):
+            self.split.setCollapsible(i, False)
         self._timeline_block = tlw
         self.setCentralWidget(self.split)
         QTimer.singleShot(0, self._initial_split_sizes)
@@ -336,12 +330,10 @@ class MainWindow(QMainWindow):
         saved = self.settings.splitter_sizes or {}
         h, w = self.split.height(), self.top_split.width()
         v = saved.get("v")
-        # maximumHeight() is still "unlimited" before the first layout pass; the size hint is the
-        # real fixed height (zoom bar + timeline). Bottom block = timeline + room for the clip table.
-        tl_h = self._timeline_block.sizeHint().height()
+        tl_h = self._timeline_block.minimumSizeHint().height()   # fixed rows + the default lanes
         rest = max(0, h - tl_h)
-        bottom = tl_h + max(self.clip_panel.minimumHeight(), int(rest * 0.28))
-        self.split.setSizes(v if v and len(v) == 2 else [max(0, h - bottom), bottom])
+        table = max(self.clip_panel.minimumHeight(), int(rest * 0.25))
+        self.split.setSizes(v if v and len(v) == 3 else [max(0, h - tl_h - table), tl_h, table])
         t = saved.get("h")
         self.top_split.setSizes(t if t and len(t) == 2 else [int(w * 0.78), int(w * 0.22)])
 

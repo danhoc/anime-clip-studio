@@ -11,7 +11,7 @@ import math
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import QColorDialog, QInputDialog, QMenu, QWidget
+from PySide6.QtWidgets import QColorDialog, QInputDialog, QMenu, QSizePolicy, QWidget
 
 from acs.core import trace
 from acs.core.document import ProjectDocument
@@ -32,7 +32,8 @@ ROW_SIZES = (  # (min logical screen height, thumbnail row, waveform row)
     (0, 76, 60),
 )
 THUMB_MIN, THUMB_MAX = 40, 150   # kept for quality heuristics (core/uiscale.py)
-DEFAULT_LANES = 3                # clip lanes always reserved (more appear when clips overlap)
+DEFAULT_LANES = 3                # minimum clip-lane area; the splitter can make it taller
+CLICK_PX = 4                     # a press on a clip edge that moves less than this is a click (seek)
 WAVE_REF_PERCENTILE = 99.97     # auto gain reference: (almost) the loudest moment of the track
 WAVE_KNEE = 0.85                 # above this, peaks are compressed smoothly instead of clipped
 EDGE_PX = 6
@@ -53,11 +54,14 @@ C_THUMBS_BG = QColor("#15171b")
 C_WAVE_BG = QColor("#191c20")
 C_OUTLINE = QColor("#ffffff")      # selection outline
 C_CLIP_TEXT = QColor("#ffffff")
+C_LANES_BG = QColor("#16181c")
+C_LANE = QColor(255, 255, 255, 10)
 
 
 def _sync_colors() -> None:
     """Pick up the active theme (dark / light)."""
     global C_BG, C_RULER, C_TEXT, C_DIM, C_KEY, C_GRID, C_WAVE, C_THUMBS_BG, C_WAVE_BG, C_OUTLINE, C_CLIP_TEXT
+    global C_LANES_BG, C_LANE
     t = theme.current()
     C_BG, C_RULER = QColor(t.timeline_bg), QColor(t.ruler_bg)
     C_TEXT, C_DIM = QColor(t.text), QColor(t.dim)
@@ -66,6 +70,9 @@ def _sync_colors() -> None:
     C_WAVE, C_THUMBS_BG, C_WAVE_BG = QColor(t.wave), QColor(t.thumbs_bg), QColor(t.wave_bg)
     C_OUTLINE = QColor("#ffffff" if t.name == "dark" else "#10141a")
     C_CLIP_TEXT = QColor(t.clip_label)
+    dark = t.name == "dark"
+    C_LANES_BG = QColor(t.thumbs_bg)
+    C_LANE = QColor(255, 255, 255, 12) if dark else QColor(0, 0, 0, 14)
 
 
 class Timeline(QWidget):
@@ -91,6 +98,7 @@ class Timeline(QWidget):
         _sync_colors()
         self._lanes: dict[str, int] = {}
         self._lane_count = 1
+        self._apply_min_height()
         doc.markers_changed.connect(self.update)
         doc.clips_changed.connect(self._relayout)
         doc.view_changed.connect(self.update)
@@ -228,7 +236,7 @@ class Timeline(QWidget):
                 lanes_end.append(end)
                 self._lanes[c.id] = len(lanes_end) - 1
         self._lane_count = max(1, len(lanes_end))
-        self.update()  # height never changes: extra lanes are squeezed into the fixed lane area
+        self.update()  # height never follows the clips: extra lanes are squeezed into the lane area
 
     def configure_for_screen(self, logical_screen_height: int) -> None:
         """Pick fixed row heights for this display (called once by the main window)."""
@@ -236,16 +244,25 @@ class Timeline(QWidget):
             if logical_screen_height >= min_h:
                 self._row_sizes = (th, wh)
                 break
-        self._apply_fixed_height()
+        self._apply_min_height()
 
-    def _apply_fixed_height(self) -> None:
-        th, wh = self._rows()
-        self.setFixedHeight(RULER_H + th + wh + 6 + self._lanes_h + 4)
+    def _apply_min_height(self) -> None:
+        """Rows above the lanes are fixed; only the clip-lane area below them may grow (splitter)."""
+        self.setMinimumHeight(self._clips_y + DEFAULT_LANES * (LANE_H + LANE_GAP) + 4)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+
+    def sizeHint(self):
+        return self.minimumSizeHint()
+
+    def minimumSizeHint(self):
+        s = super().minimumSizeHint()
+        s.setHeight(self.minimumHeight())
+        return s
 
     @property
     def _lanes_h(self) -> int:
-        """Fixed height of the clip-lane area (room for DEFAULT_LANES full-size lanes)."""
-        return DEFAULT_LANES * (LANE_H + LANE_GAP)
+        """Height of the clip-lane area (at least DEFAULT_LANES full-size lanes)."""
+        return max(DEFAULT_LANES * (LANE_H + LANE_GAP), self.height() - self._clips_y - 4)
 
     def _lane_geom(self) -> tuple[float, float]:
         """(lane pitch, lane height): full size while the lanes fit, squeezed when clips overlap more."""
@@ -301,6 +318,7 @@ class Timeline(QWidget):
         self._paint_thumbs(p)
         self._paint_wave(p)
         self._paint_ruler(p)
+        self._paint_lanes(p)
         self._paint_grid(p)
         self._paint_clips(p)
         self._paint_markers(p)
@@ -439,6 +457,27 @@ class Timeline(QWidget):
         p.drawLine(QPointF(x0, base), QPointF(x1, base))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+    def _paint_lanes(self, p: QPainter):
+        """Clip-lane area: one stripe per lane slot, so it reads as room for clips, not empty space."""
+        y0 = self._clips_y
+        w = self.width()
+        p.fillRect(0, y0 - 3, w, self.height() - y0 + 3, C_LANES_BG)
+        pitch, height = self._lane_geom()
+        slots = max(self._lane_count, int((self._lanes_h + LANE_GAP) // pitch))
+        used = set(self._lanes.values())
+        p.setFont(self._font(9))
+        hint_done = False
+        for i in range(slots):
+            r = QRectF(0, y0 + i * pitch, w, height)
+            p.fillRect(r, C_LANE)
+            if i in used or hint_done or height < 14:
+                continue
+            hint_done = True
+            p.setPen(C_DIM)
+            text = (tr("Clip lanes — press I to start a clip, O to end it") if not used
+                    else tr("Free clip lane — overlapping clips are placed here"))
+            p.drawText(r.adjusted(12, 0, -12, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
 
     def _paint_clips(self, p: QPainter):
         sel = set(self.doc.selected_clips)
@@ -592,7 +631,8 @@ class Timeline(QWidget):
         if kind in ("clip_in", "clip_out"):
             c = self.doc.project.clip_by_id(hit["cid"])
             self.doc.select_clips([c.id])
-            self._drag = {"kind": kind, "cid": c.id, "preview": (c.in_frame, c.out_frame)}
+            self._drag = {"kind": kind, "cid": c.id, "preview": (c.in_frame, c.out_frame),
+                          "x": ev.position().x(), "moved": False}
         elif kind == "clip":
             ids = list(self.doc.selected_clips)
             if ctrl:
@@ -638,6 +678,9 @@ class Timeline(QWidget):
             self.doc._set_view(self.doc.project.view.pps,
                                self._clamp_scroll(d["scroll"] - (pos.x() - d["x"]) / pps, pps))
         elif kind in ("clip_in", "clip_out"):
+            if not d["moved"] and abs(pos.x() - d["x"]) < CLICK_PX:
+                return   # still a click: don't nudge the edge by a frame
+            d["moved"] = True
             c = self.doc.project.clip_by_id(d["cid"])
             f = self._snap_frame(pos.x(), exclude_cid=c.id, no_snap=no_snap)
             pin, pout = d["preview"]
@@ -662,7 +705,13 @@ class Timeline(QWidget):
         if d["kind"] in ("clip_in", "clip_out"):
             pin, pout = d["preview"]
             c = self.doc.project.clip_by_id(d["cid"])
-            if c is not None:
+            if c is not None and not d["moved"]:
+                # click on an edge: jump to the clip's first frame / last frame (Out is exclusive)
+                f = c.in_frame if d["kind"] == "clip_in" or c.out_frame is None else c.out_frame - 1
+                t = self.doc.time_of(f)
+                self.position = t
+                self.seek_requested.emit(t)
+            elif c is not None:
                 fields = {}
                 if pin != c.in_frame:
                     fields["in_frame"] = pin
@@ -697,7 +746,7 @@ class Timeline(QWidget):
         k = hit["kind"]
         if k in ("clip_in", "clip_out"):
             self.setCursor(Qt.CursorShape.SizeHorCursor)
-            self.hint.emit(tr("Drag to move the clip edge · Alt — no snapping"))
+            self.hint.emit(tr("Click — go to this clip edge · drag — move it · Alt — no snapping"))
         elif k == "marker":
             self.setCursor(Qt.CursorShape.SizeHorCursor)
             self.hint.emit(tr("Drag to move the marker · Del — delete"))

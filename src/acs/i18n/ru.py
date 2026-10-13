@@ -169,7 +169,10 @@ RU: dict[str, str] = {
         "Откройте видео, чтобы увидеть таймлайн. I — начало клипа, O — конец.",
     "generating thumbnails…": "создание миниатюр…",
     "Move clip edge": "Сдвиг края клипа",
-    "Drag to move the clip edge · Alt — no snapping": "Тяните, чтобы сдвинуть край клипа · Alt — без привязки",
+    "Click — go to this clip edge · drag — move it · Alt — no snapping":
+        "Клик — перейти к этому краю клипа · перетаскивание — сдвинуть его · Alt — без привязки",
+    "Clip lanes — press I to start a clip, O to end it": "Дорожки клипов — I начинает клип, O завершает его",
+    "Free clip lane — overlapping clips are placed here": "Свободная дорожка — сюда попадают перекрывающиеся клипы",
     "Drag to move the marker · Del — delete": "Тяните, чтобы сдвинуть метку · Del — удалить",
     "Ctrl+wheel — zoom · wheel — scroll · click — seek · right click — menu":
         "Ctrl+колесо — масштаб · колесо — прокрутка · клик — перемотка · правый клик — меню",
