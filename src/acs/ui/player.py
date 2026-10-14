@@ -25,11 +25,14 @@ from acs.core import trace
 log = logging.getLogger("acs.player")
 
 _mpv_module = None
-POLL_FAST_MS = 15      # playing, seeking or right after a command
+POLL_SEEK_MS = 4       # a seek is running: notice its end at once, so the next one follows without delay
+POLL_FAST_MS = 15      # playing or right after a command
 POLL_IDLE_MS = 60      # paused, nothing happening
 POLL_EMPTY_MS = 250    # no file loaded
 FAST_AFTER_CMD = 1.0   # seconds of fast polling after a command
-SEEK_TIMEOUT = 0.3     # a seek with no "playback restart" event counts as done after this
+# A seek with no "playback restart" event counts as done after this. Generous: an exact seek on a
+# slow PC can take ~0.5 s, and sending the next one earlier would abort it before any frame shows.
+SEEK_TIMEOUT = 1.0
 
 _OBS_TIME, _OBS_PAUSE, _OBS_DURATION = 1, 2, 3
 _FMT_FLAG, _FMT_DOUBLE = 3, 5
@@ -160,6 +163,8 @@ class MpvPlayer(QWidget):
         self._crop: str | None = None
         self._seek_want: tuple[float, bool] | None = None   # newest request not sent yet
         self._seek_sent: float | None = None                # monotonic time of the seek in flight
+        self._seek_precise = True
+        self.seek_latency = 0.05   # smoothed duration of an exact seek on this PC / file (seconds)
         self._fast_until = 0.0
         self._ev = getattr(self.mpv, "_event_handle", None)
         self._observing = False
@@ -196,6 +201,9 @@ class MpvPlayer(QWidget):
             if eid == ids.PROPERTY_CHANGE and ev._data:  # noqa: SLF001
                 self._on_property(int(ev.reply_userdata), ev._data)  # noqa: SLF001
             elif eid == ids.PLAYBACK_RESTART:
+                if self._seek_sent is not None and self._seek_precise:
+                    took = time.monotonic() - self._seek_sent
+                    self.seek_latency = 0.7 * self.seek_latency + 0.3 * took
                 self._seek_sent = None
 
     def _on_property(self, uid: int, ptr: int) -> None:
@@ -247,7 +255,9 @@ class MpvPlayer(QWidget):
         """Poll fast only while something can change (playback, seeks, recent commands)."""
         if not self._path:
             ms = POLL_EMPTY_MS
-        elif self._seen_pause is False or self.seek_busy or time.monotonic() < self._fast_until:
+        elif self.seek_busy:
+            ms = POLL_SEEK_MS
+        elif self._seen_pause is False or time.monotonic() < self._fast_until:
             ms = POLL_FAST_MS
         else:
             ms = POLL_IDLE_MS
@@ -256,7 +266,7 @@ class MpvPlayer(QWidget):
 
     def _kick(self) -> None:
         self._fast_until = time.monotonic() + FAST_AFTER_CMD
-        if self._poll.interval() != POLL_FAST_MS:
+        if self._poll.interval() > POLL_FAST_MS:
             self._poll.setInterval(POLL_FAST_MS)
 
     def _cmd(self, *args: str) -> None:
@@ -286,6 +296,8 @@ class MpvPlayer(QWidget):
 
     def _seek_in_flight(self) -> bool:
         if self._seek_sent is not None and time.monotonic() - self._seek_sent >= SEEK_TIMEOUT:
+            if self._seek_precise:   # no restart event: count it as (at least) this slow
+                self.seek_latency = 0.7 * self.seek_latency + 0.3 * SEEK_TIMEOUT
             self._seek_sent = None
         return self._seek_sent is not None
 
@@ -295,8 +307,10 @@ class MpvPlayer(QWidget):
         t, precise = self._seek_want
         self._seek_want = None
         self._seek_sent = time.monotonic()
+        self._seek_precise = precise
         trace.throttled("player.seek", 0.25, "player", f"seek {t:.3f} {'exact' if precise else 'keyframes'}")
         self._cmd_async("seek", f"{t:.6f}", "absolute+exact" if precise else "absolute+keyframes")
+        self._poll.setInterval(POLL_SEEK_MS)
 
     # ---- control ----
     def load(self, path: str, start: float = 0.0, aid: int | None = None, sid: int | None = None) -> None:

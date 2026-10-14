@@ -72,6 +72,11 @@ def test_scan_index_and_gops():
     assert list(fi.gops.gop_start_frame) == [0, 24, 48, 72, 96]
     assert fi.prev_keyframe(30) == 24 and fi.next_keyframe(30) == 48
     assert fi.is_keyframe(48) and not fi.is_keyframe(47)
+    assert fi.typical_gop == pytest.approx(24 * FD)
+
+
+def test_typical_gop_unknown_without_scan():
+    assert FrameIndex.cfr(FPS, 10.0).typical_gop is None
 
 
 def test_nonzero_start_time_is_relative():

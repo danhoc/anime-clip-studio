@@ -42,6 +42,9 @@ class FrameIndex:
             self._sorted_keys = np.unique(gops.key_frame)
         else:
             self._sorted_keys = np.zeros(0, dtype=np.int64)
+        # median distance between keyframes in seconds (None until the packet scan knows them)
+        k = self._sorted_keys
+        self.typical_gop = float(np.median(np.diff(self.times[k]))) if len(k) >= 2 else None
 
     # ---- construction -------------------------------------------------------------------
     @classmethod

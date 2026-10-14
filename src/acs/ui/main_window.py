@@ -55,9 +55,11 @@ from acs.ui.timeline import SMALL_SCREEN_H, Timeline
 log = logging.getLogger("acs.ui")
 
 DOCK_STATE_VERSION = 2  # bump when the default dock arrangement changes
-# Scrubbing: fast mouse moves seek to keyframes (instant), slow moves and rests seek exactly.
+# Scrubbing: exact seeks (merged, one at a time) while they can keep up with the mouse; keyframe
+# seeks only when the playhead crosses more than a whole GOP during one exact seek (fast sweeps on a
+# zoomed-out timeline or a slow PC) — below that they would just repeat the same keyframe.
 SCRUB_SETTLE_MS = 120       # the mouse rests this long -> exact seek
-SCRUB_FAST = 3.0            # video seconds per wall-clock second above which keyframe seeks are used
+SCRUB_RELEASE = 0.5         # hysteresis: back to exact seeks below this share of the keyframe threshold
 
 
 class TrackButton(QToolButton):
@@ -134,6 +136,7 @@ class MainWindow(QMainWindow):
         self._paused = True
         self._scrubbing = False
         self._scrub_speed = 0.0          # smoothed scrub speed, video seconds per second
+        self._scrub_keyframes = False    # currently scrubbing with keyframe seeks
         self._scrub_last = (0.0, 0.0)    # (monotonic time, video time) of the previous scrub step
         self._last_seek: tuple[float, bool] | None = None   # (time, precise) of the newest seek request
         self._autosave_pending = False
@@ -953,8 +956,8 @@ class MainWindow(QMainWindow):
         self._update_labels()
 
     def scrub(self, t: float) -> None:
-        """Playhead dragged: the timeline follows the mouse at once; the picture uses keyframe seeks
-        while the mouse moves fast and an exact seek as soon as it slows down or rests."""
+        """Playhead dragged: the timeline follows the mouse at once; the picture uses exact seeks,
+        or keyframe seeks while the mouse sweeps faster than exact seeks can follow."""
         now = time.monotonic()
         last_wall, last_t = self._scrub_last
         if self._scrubbing and now > last_wall:
@@ -962,10 +965,26 @@ class MainWindow(QMainWindow):
             self._scrub_speed = 0.6 * self._scrub_speed + 0.4 * rate
         else:
             self._scrub_speed = 0.0
+            self._scrub_keyframes = False
         self._scrub_last = (now, t)
         self._scrubbing = True
-        self.seek(t, precise=self._scrub_speed < SCRUB_FAST)
+        limit = self._keyframe_scrub_speed()
+        if self._scrub_keyframes:
+            self._scrub_keyframes = self._scrub_speed > limit * SCRUB_RELEASE
+        else:
+            self._scrub_keyframes = self._scrub_speed > limit
+        self.seek(t, precise=not self._scrub_keyframes)
         self._scrub_settle.start()
+
+    def _keyframe_scrub_speed(self) -> float:
+        """Scrub speed (video seconds per second) above which keyframe seeks help: one exact seek
+        takes `seek_latency`, so only when the playhead covers more than a typical GOP in that time
+        would exact seeks fall behind. The zoom is part of it: the same mouse speed is more video
+        seconds per second on a zoomed-out timeline."""
+        gop = self.doc.index.typical_gop if self.doc.index is not None else None
+        if not gop or self.player is None:
+            return float("inf")   # keyframes unknown yet: exact seeks only
+        return gop / max(0.01, self.player.seek_latency)
 
     def _scrub_exact(self) -> None:
         if self._scrubbing and self._last_seek != (self._pos, True):
