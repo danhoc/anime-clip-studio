@@ -11,7 +11,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
 from acs.core.clipinfo import effective_audio, effective_preset, summarize
 from acs.core.document import ProjectDocument
 from acs.core.model import CropRect
-from acs.core.presets import HEIGHT_STEPS, PresetStore
+from acs.core.ffmpeg_cmd import available_heights
+from acs.core.presets import PresetStore
 from acs.core.util import fmt_duration, fmt_time
 from acs.ui import theme
 from acs.i18n import tr
@@ -130,14 +131,14 @@ class ClipPanel(QWidget):
             sp.setToolTip(tr("Crop rectangle in source pixels"))
             self.crop_spins.append(sp)
             spin_row.addWidget(sp)
-        self.height = QComboBox()
-        self.height.setToolTip(tr("Output height. Only downscaling is possible; it forces re-encoding."))
+        self.res_combo = QComboBox()
+        self.res_combo.setToolTip(tr("Output height. Only downscaling is possible; it forces re-encoding."))
         self.custom_h = QSpinBox()
         self.custom_h.setRange(64, 4320)
         self.custom_h.setSingleStep(2)
         self.custom_h.setToolTip(tr("Custom height (must be below the source height)"))
         h_row = QHBoxLayout()
-        h_row.addWidget(self.height, 1)
+        h_row.addWidget(self.res_combo, 1)
         h_row.addWidget(self.custom_h)
         self.preset = QComboBox()
         self.preset.setToolTip(tr("Export preset for this clip"))
@@ -188,7 +189,7 @@ class ClipPanel(QWidget):
         self.crop_preview.toggled.connect(lambda _v: self._emit_preview())
         for sp in self.crop_spins:
             sp.editingFinished.connect(self._crop_spins_changed)
-        self.height.currentIndexChanged.connect(self._height_changed)
+        self.res_combo.currentIndexChanged.connect(self._height_changed)
         self.custom_h.editingFinished.connect(self._height_changed)
         self.preset.currentIndexChanged.connect(lambda: self._apply({"preset_id": self.preset.currentData()},
                                                                     tr("Clip preset")))
@@ -234,16 +235,15 @@ class ClipPanel(QWidget):
         _combo_set(self.def_sub, p.default_sub_track)
         self.out_dir.setText(p.output_dir or self.settings.output_dir)
 
-        self.height.blockSignals(True)
-        self.height.clear()
-        self.height.addItem(tr("As preset"), None)
-        self.height.addItem(tr("Original (no scaling)"), 0)
+        self.res_combo.blockSignals(True)
+        self.res_combo.clear()
+        self.res_combo.addItem(tr("As preset"), None)
+        self.res_combo.addItem(tr("Original (no scaling)"), 0)
         src_h = info.video.height if info and info.video else 99999
-        for h in HEIGHT_STEPS:
-            if h < src_h:
-                self.height.addItem(f"{h}p", h)
-        self.height.addItem(tr("Custom…"), -1)
-        self.height.blockSignals(False)
+        for h in available_heights(src_h):
+            self.res_combo.addItem(f"{h}p", h)
+        self.res_combo.addItem(tr("Custom…"), -1)
+        self.res_combo.blockSignals(False)
         self._updating = False
         self.refresh()
 
@@ -376,11 +376,11 @@ class ClipPanel(QWidget):
             sp.setEnabled(c.crop_mode == "manual")
             sp.blockSignals(False)
         self.detect.setEnabled(c.crop_mode != "none")
-        if c.target_height is None or c.target_height == 0 or self.height.findData(c.target_height) >= 0:
-            _combo_set(self.height, c.target_height)
+        if c.target_height is None or c.target_height == 0 or self.res_combo.findData(c.target_height) >= 0:
+            _combo_set(self.res_combo, c.target_height)
             self.custom_h.setVisible(False)
         else:
-            _combo_set(self.height, -1)
+            _combo_set(self.res_combo, -1)
             self.custom_h.setVisible(True)
             self.custom_h.blockSignals(True)
             self.custom_h.setValue(c.target_height)
@@ -432,7 +432,7 @@ class ClipPanel(QWidget):
     def _height_changed(self) -> None:
         if self._updating:
             return
-        data = self.height.currentData()
+        data = self.res_combo.currentData()
         self.custom_h.setVisible(data == -1)
         if data == -1:
             src_h = self.doc.info.video.height if self.doc.info and self.doc.info.video else 4320

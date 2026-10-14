@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPalette
 
-THEMES = ("dark", "light", "system")
-
 
 @dataclass(frozen=True)
 class Theme:

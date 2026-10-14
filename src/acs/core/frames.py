@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
@@ -388,12 +388,6 @@ def _run_parallel_seeks(ctx, job, cfg, info, ranges, subs, out_dir: Path, video_
             fut.result()
     ctx.check()
     ctx.set_progress(1.0, f"saved {job.state['kept']}", force=True)
-
-
-@dataclass
-class FramesPreview:
-    count_estimate: int = 0
-    notes: list[str] = field(default_factory=list)
 
 
 def estimate_count(cfg: FramesConfig) -> int:

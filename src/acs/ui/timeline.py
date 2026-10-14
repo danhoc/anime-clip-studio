@@ -31,7 +31,6 @@ ROW_SIZES = (  # (min logical screen height, thumbnail row, waveform row)
     (1000, 100, 80),
     (0, 76, 60),
 )
-THUMB_MIN, THUMB_MAX = 40, 150   # kept for quality heuristics (core/uiscale.py)
 DEFAULT_LANES = 3                # minimum clip-lane area; the splitter can make it taller
 CLICK_PX = 4                     # a press on a clip edge that moves less than this is a click (seek)
 WAVE_REF_PERCENTILE = 99.97     # auto gain reference: (almost) the loudest moment of the track

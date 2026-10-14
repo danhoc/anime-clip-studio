@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import faulthandler
-import json
 import logging
 import os
 import sys
@@ -290,7 +289,3 @@ def save_queue_state(jobs: list[dict]) -> None:
 def load_queue_state() -> list[dict]:
     data = read_json(queue_file(), {}) or {}
     return [j for j in data.get("jobs", []) if isinstance(j, dict)]
-
-
-def dump_json(obj) -> str:
-    return json.dumps(obj, ensure_ascii=False)

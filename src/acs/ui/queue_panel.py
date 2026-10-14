@@ -11,7 +11,7 @@ from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (QHBoxLayout, QHeaderView, QProgressBar, QPushButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
-from acs.core.jobs import ACTIVE, CANCELLED, DONE, FAILED, JobQueue
+from acs.core.jobs import CANCELLED, DONE, FAILED, JobQueue
 from acs.i18n import tr
 from acs.ui.texts import status_text, warning_text
 
@@ -97,8 +97,7 @@ class QueuePanel(QWidget):
         it.setText(3, text)
         it.setToolTip(3, "\n".join(x for x in [job.message, extra] + warns if x))
         color = {DONE: "#5cd17b", FAILED: "#ff6b6b", CANCELLED: "#a0a0a0"}.get(job.status)
-        if color:
-            it.setForeground(1, QBrush(QColor(color)))
+        it.setForeground(1, QBrush(QColor(color)) if color else QBrush())  # a retried job loses its old colour
         if job.warnings and job.status == DONE:
             it.setText(1, status_text(job.status) + " ⚠")
 
@@ -142,6 +141,3 @@ class QueuePanel(QWidget):
             subprocess.Popen(["explorer", os.path.normpath(str(p))])
         elif p.parent.is_dir():
             subprocess.Popen(["explorer", os.path.normpath(str(p.parent))])
-
-    def active_count(self) -> int:
-        return sum(1 for j in self.queue.jobs if j.status in ACTIVE)

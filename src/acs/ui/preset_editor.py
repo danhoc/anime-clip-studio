@@ -8,8 +8,8 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
 from acs.core.model import new_id
-from acs.core.presets import (ANIM_HEIGHT_STEPS, AUDIO_CODECS, CODECS, GIF_DITHERS, HEIGHT_STEPS, Preset,
-                              PresetStore)
+from acs.core.presets import (ANIM_HEIGHT_STEPS, AUDIO_CODECS, CODECS, CONTAINERS, GIF_DITHERS, HEIGHT_STEPS,
+                              Preset, PresetStore)
 from acs.ui import theme
 from acs.i18n import tr
 
@@ -105,7 +105,7 @@ class PresetEditor(QDialog):
         self.v_tune = QComboBox()
         self.v_tune.setToolTip(tr("'animation' tune is tuned for cartoons/anime"))
         self.v_container = QComboBox()
-        for c in ("mp4", "mkv", "webm"):
+        for c in CONTAINERS:
             self.v_container.addItem(c.upper(), c)
         self.v_container.setToolTip(tr("MP4 plays everywhere; MKV can keep any audio (FLAC, AC3); WebM for the web"))
         self.v_acodec = QComboBox()

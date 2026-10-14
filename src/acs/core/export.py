@@ -336,11 +336,3 @@ def _run_anim(ctx: JobContext, spec: ExportSpec, info: MediaInfo, preset: Preset
         encode(params, spec.in_time, spec.duration, spec.output, span=(0.02, 1.0), message="encoding")
         ctx.job.state["anim_params"] = params.describe(kind, src_h)
 
-
-def preview_reasons(clip, preset: Preset, info: MediaInfo, height_req: int | None, has_subs: bool) -> list[str]:
-    """Why a clip with a smart-cut preset will be fully re-encoded (shown as ⓘ in the clip table)."""
-    crop = clip.crop if clip.crop_mode != "none" and clip.crop and clip.crop.is_valid() else None
-    _, src_h = source_dims(info, crop)
-    h = clamp_height(height_req, src_h)
-    return reencode_reasons(bool(clip.burn_subs and has_subs), crop, h)
-

@@ -16,8 +16,6 @@ from acs.core.util import file_fingerprint, spawn
 
 DEFAULT_BPS = 100            # buckets (peak values) per second = 10 ms
 QUALITY_CHOICES = (100, 200, 400, 800)
-# kept for older callers
-BUCKETS_PER_SECOND = DEFAULT_BPS
 
 
 def sample_rate_for(bps: int) -> int:

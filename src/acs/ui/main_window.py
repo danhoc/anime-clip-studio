@@ -1369,15 +1369,17 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, ev):
         trace.log("ui", "main window close requested")
-        if any(j.status in ACTIVE for j in self.queue.jobs):
+        jobs_running = any(j.status in ACTIVE for j in self.queue.jobs)
+        if jobs_running:
             r = QMessageBox.question(self, APP_TITLE, tr("Jobs are still running. Cancel them and quit?"))
             if r != QMessageBox.StandardButton.Yes:
                 ev.ignore()
                 return
-            self.queue.cancel_all()
         if not self._confirm_discard():
             ev.ignore()
-            return
+            return  # nothing cancelled yet: the jobs keep running
+        if jobs_running:
+            self.queue.cancel_all()
         self._autosave()
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         self.settings.window_state = bytes(self.saveState(DOCK_STATE_VERSION).toBase64()).decode()

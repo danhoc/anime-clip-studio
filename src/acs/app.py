@@ -19,11 +19,6 @@ from acs.ui import theme
 from acs.ui.trace_filter import EventTracer
 
 
-def _dark_palette(app: QApplication, name: str = "dark") -> None:
-    """Kept for helper scripts; the app uses the theme chosen in Settings."""
-    theme.apply(app, name)
-
-
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     debug = "--debug" in argv
