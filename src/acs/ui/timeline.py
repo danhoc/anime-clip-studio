@@ -2,6 +2,10 @@
 
 Zoom/scroll changes go through ProjectDocument.set_view (undoable, merged); auto-follow during
 playback changes the view without touching the undo stack.
+
+Rendering: everything that depends only on the view (thumbnails, waveform, ruler, lane stripes,
+frame grid) is drawn once into a cached pixmap; clips, markers and the playhead are painted on top,
+so moving the playhead repaints a few pixels instead of the whole widget.
 """
 
 from __future__ import annotations
@@ -90,13 +94,17 @@ class Timeline(QWidget):
         self._row_sizes = ROW_SIZES[1][1:]
         self.position = 0.0
         self.thumb_times: np.ndarray | None = None
-        self.thumb_source: list[QImage] = []   # as decoded (72 px tall)
-        self.thumb_images: list[QImage] = []   # scaled to the current row height
-        self._thumb_h_cached = 0
+        self._thumb_arr: np.ndarray | None = None     # [N, H, W, 3] as decoded
+        self._thumb_cache: dict[int, QImage] = {}     # scaled to the row height, made on first use
+        self._thumb_key: tuple | None = None
         self.wave: np.ndarray | None = None
         self.wave_bps = DEFAULT_BPS
+        self.wave_ref = 255.0
         self._drag: dict | None = None
-        _sync_colors()
+        self._fonts: dict[int, QFont] = {}
+        self._bg: QPixmap | None = None
+        self._bg_key: tuple | None = None
+        _sync_colors()   # the theme only changes after a restart
         self._lanes: dict[str, int] = {}
         self._lane_count = 1
         self._apply_min_height()
@@ -109,34 +117,38 @@ class Timeline(QWidget):
 
     # ---- data feeds ----------------------------------------------------------------------
     def _on_loaded(self):
-        self.thumb_times, self.thumb_source, self.thumb_images, self.wave = None, [], [], None
-        self._thumb_h_cached = 0
+        self.thumb_times, self._thumb_arr, self.wave = None, None, None
+        self._thumb_cache = {}
         self.position = self.doc.project.view.position
         self._relayout()
 
     def set_thumbnails(self, times: np.ndarray, images: np.ndarray) -> None:
         self.thumb_times = times
-        self.thumb_source = []
-        for img in images:
-            h, w, _ = img.shape
-            self.thumb_source.append(QImage(img.data, w, h, w * 3, QImage.Format.Format_RGB888).copy())
-        self._thumb_h_cached = 0
+        self._thumb_arr = np.ascontiguousarray(images) if len(images) else None
+        self._thumb_cache = {}
         self.update()
 
-    def _scaled_thumbs(self, h: int) -> list[QImage]:
-        """Thumbnails scaled to the row height in *device* pixels (crisp on HiDPI screens)."""
+    def _thumb(self, i: int, h: int) -> QImage:
+        """Thumbnail i scaled to the row height in *device* pixels (crisp on HiDPI screens).
+
+        Scaled lazily: only thumbnails that are actually shown are converted, so opening a long
+        episode does not scale hundreds of images on the GUI thread at once."""
         dpr = self.devicePixelRatioF()
         key = (h, round(dpr, 3))
-        if key != self._thumb_h_cached:
-            mode = Qt.TransformationMode.SmoothTransformation
-            images = []
-            for q in self.thumb_source:
-                s = q.scaledToHeight(max(1, round(h * dpr)), mode)
-                s.setDevicePixelRatio(dpr)
-                images.append(s)
-            self.thumb_images = images
-            self._thumb_h_cached = key
-        return self.thumb_images
+        if key != self._thumb_key:
+            self._thumb_cache, self._thumb_key = {}, key
+        img = self._thumb_cache.get(i)
+        if img is None:
+            a = self._thumb_arr[i]
+            th, tw, _ = a.shape
+            src = QImage(a.data, tw, th, tw * 3, QImage.Format.Format_RGB888)
+            target = max(1, round(h * dpr))
+            # scaled() may return a shallow copy when the size is unchanged: always own the pixels
+            img = (src.copy() if target == th
+                   else src.scaledToHeight(target, Qt.TransformationMode.SmoothTransformation))
+            img.setDevicePixelRatio(dpr)
+            self._thumb_cache[i] = img
+        return img
 
     def set_waveform(self, peaks: np.ndarray | None, bps: int = DEFAULT_BPS) -> None:
         self.wave = peaks
@@ -160,9 +172,18 @@ class Timeline(QWidget):
                 pps = self.pps
                 self.doc._set_view(self.doc.project.view.pps, self._clamp_scroll(t - 0.1 * self.width() / pps, pps))
                 return
-        new_x = self.t2x(t)
+        self._update_playhead(old_x, self.t2x(t))
+
+    def _update_playhead(self, old_x: float, new_x: float) -> None:
+        """Repaint only what a playhead move changes: the old and new playhead strips and the clip
+        that is still open (its right edge and "…" tag follow the playhead)."""
         lo, hi = min(old_x, new_x) - 8, max(old_x, new_x) + 8
         self.update(int(lo), 0, int(hi - lo) + 1, self.height())
+        c = self.doc.open_clip()
+        if c is not None:
+            r = self._clip_rect(c)
+            right = max(r.right(), old_x, new_x) + 4
+            self.update(QRectF(r.left() - 4, r.top() - 3, right - r.left() + 8, r.height() + 6).toAlignedRect())
 
     # ---- view mapping --------------------------------------------------------------------
     @property
@@ -275,7 +296,7 @@ class Timeline(QWidget):
 
     def _rows(self) -> tuple[int, int]:
         """(thumbnail height, waveform height) — fixed, independent of the widget height."""
-        return getattr(self, "_row_sizes", ROW_SIZES[1][1:])
+        return self._row_sizes
 
     @property
     def _thumbs_y(self) -> int:
@@ -303,29 +324,45 @@ class Timeline(QWidget):
 
     # ---- painting ------------------------------------------------------------------------
     def paintEvent(self, ev):
-        trace.vlog("paint", f"timeline begin rect={ev.rect().x()},{ev.rect().width()} pps={self.pps:.2f}")
-        self._paint(ev)
-        trace.vlog("paint", "timeline end")
+        verbose = trace.is_verbose()
+        if verbose:
+            trace.vlog("paint", f"timeline begin rect={ev.rect().x()},{ev.rect().width()} pps={self.pps:.2f}")
+        self._paint()
+        if verbose:
+            trace.vlog("paint", "timeline end")
 
-    def _paint(self, ev):
-        _sync_colors()
-        self._dirty_rect = ev.rect()
+    def _paint(self):
         p = QPainter(self)
-        p.fillRect(self.rect(), C_BG)
         if not self.doc.has_video:
+            p.fillRect(self.rect(), C_BG)
             p.setPen(C_DIM)
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
                        tr("Open a video to see its timeline. Press I to start a clip, O to end it."))
             return
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        self._paint_thumbs(p)
-        self._paint_wave(p)
-        self._paint_ruler(p)
-        self._paint_lanes(p)
-        self._paint_grid(p)
+        p.drawPixmap(0, 0, self._background())
         self._paint_clips(p)
         self._paint_markers(p)
         self._paint_playhead(p)
+
+    def _background(self) -> QPixmap:
+        """Thumbnails, waveform, ruler, lane stripes and frame grid for the current view (cached)."""
+        dpr = self.devicePixelRatioF()
+        key = (self.width(), self.height(), round(dpr, 3), self.pps, self.scroll, self._row_sizes,
+               id(self._thumb_arr), id(self.wave), self.wave_ref, id(self.doc.index),
+               self._lane_count, frozenset(self._lanes.values()))
+        if key != self._bg_key or self._bg is None:
+            pm = QPixmap(max(1, math.ceil(self.width() * dpr)), max(1, math.ceil(self.height() * dpr)))
+            pm.setDevicePixelRatio(dpr)
+            p = QPainter(pm)
+            p.fillRect(QRectF(0, 0, self.width(), self.height()), C_BG)
+            self._paint_thumbs(p)
+            self._paint_wave(p)
+            self._paint_ruler(p)
+            self._paint_lanes(p)
+            self._paint_grid(p)
+            p.end()
+            self._bg, self._bg_key = pm, key
+        return self._bg
 
     def _visible_range(self) -> tuple[float, float]:
         return self.x2t(0), self.x2t(self.width())
@@ -378,28 +415,29 @@ class Timeline(QWidget):
             p.drawLine(x, top, x, bottom)
 
     def _font(self, pt: int) -> QFont:
-        f = QFont(self.font())
-        f.setPointSize(pt)
+        f = self._fonts.get(pt)
+        if f is None:
+            f = self._fonts[pt] = QFont(self.font())
+            f.setPointSize(pt)
         return f
 
     def _paint_thumbs(self, p: QPainter):
         y = self._thumbs_y
         th = self._rows()[0]
         p.fillRect(0, y, self.width(), th, C_THUMBS_BG)
-        if self.thumb_times is None or not self.thumb_source:
+        if self.thumb_times is None or self._thumb_arr is None:
             p.setPen(C_DIM)
             p.drawText(QRectF(0, y, self.width(), th), Qt.AlignmentFlag.AlignCenter,
                        tr("generating thumbnails…") if self.doc.has_video else "")
             return
-        images = self._scaled_thumbs(th)
-        tw = images[0].deviceIndependentSize().width()
+        tw = self._thumb(0, th).deviceIndependentSize().width()
         x = 0.0
         times = self.thumb_times
+        last = len(self._thumb_arr) - 1
         while x < self.width():
             t = self.x2t(x + tw / 2)
             i = int(np.searchsorted(times, t, side="right")) - 1
-            i = max(0, min(i, len(images) - 1))
-            p.drawImage(QPointF(x, y), images[i])
+            p.drawImage(QPointF(x, y), self._thumb(max(0, min(i, last)), th))
             x += tw
 
     def wave_envelope(self, x0: float, x1: float, step: float) -> tuple[np.ndarray, np.ndarray]:
@@ -437,14 +475,13 @@ class Timeline(QWidget):
         p.fillRect(0, y, self.width(), h, C_WAVE_BG)
         if self.wave is None or len(self.wave) == 0:
             return
-        r = getattr(self, "_dirty_rect", self.rect())
-        x0, x1 = max(0, r.left() - 2), min(self.width(), r.right() + 3)
+        x0, x1 = 0, self.width()
         step = 1.0 / max(1.0, self.devicePixelRatioF())     # one sample per *device* pixel
         xs, vals = self.wave_envelope(x0, x1, step)
         # The waveform is symmetric, so only its upper half is drawn, rising from the bottom edge:
         # the full row height becomes amplitude (twice the detail of a mirrored drawing).
         base = y + h - 1
-        x = vals / getattr(self, "wave_ref", 255.0)
+        x = vals / self.wave_ref
         # linear up to the knee, then a smooth tanh shoulder that approaches (never hits) the top:
         # loud passages keep their shape instead of turning into a flat clipped band
         k = WAVE_KNEE
