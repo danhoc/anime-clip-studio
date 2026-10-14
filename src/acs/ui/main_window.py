@@ -53,6 +53,9 @@ from acs.ui.timeline import Timeline
 log = logging.getLogger("acs.ui")
 
 DOCK_STATE_VERSION = 2  # bump when the default dock arrangement changes
+# Scrubbing: fast mouse moves seek to keyframes (instant), slow moves and rests seek exactly.
+SCRUB_SETTLE_MS = 120       # the mouse rests this long -> exact seek
+SCRUB_FAST = 3.0            # video seconds per wall-clock second above which keyframe seeks are used
 
 
 class MainWindow(QMainWindow):
@@ -72,6 +75,10 @@ class MainWindow(QMainWindow):
         self._opening = False
         self._pos = 0.0
         self._paused = True
+        self._scrubbing = False
+        self._scrub_speed = 0.0          # smoothed scrub speed, video seconds per second
+        self._scrub_last = (0.0, 0.0)    # (monotonic time, video time) of the previous scrub step
+        self._last_seek: tuple[float, bool] | None = None   # (time, precise) of the newest seek request
         self._autosave_pending = False
         self._shortcuts_dlg: ShortcutsDialog | None = None
         self.setWindowTitle(APP_TITLE)
@@ -316,6 +323,10 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.l_info)
 
         # timers
+        self._scrub_settle = QTimer(self)
+        self._scrub_settle.setSingleShot(True)
+        self._scrub_settle.setInterval(SCRUB_SETTLE_MS)
+        self._scrub_settle.timeout.connect(self._scrub_exact)
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setSingleShot(True)
         self._autosave_timer.setInterval(2000)
@@ -447,6 +458,8 @@ class MainWindow(QMainWindow):
         self.c_sid.currentIndexChanged.connect(self._preview_sid_changed)
         self.vol.valueChanged.connect(lambda v: self.player and self.player.set_volume(v))
         self.timeline.seek_requested.connect(self.seek)
+        self.timeline.scrub_moved.connect(self.scrub)
+        self.timeline.scrub_finished.connect(self.scrub_end)
         self.timeline.hint.connect(self.hint.setText)
         self.timeline.context_action.connect(self._timeline_action)
         self.clip_panel.seek_requested.connect(self.seek)
@@ -828,6 +841,8 @@ class MainWindow(QMainWindow):
     # Playback & navigation
     # =========================================================================================
     def _on_time(self, t: float) -> None:
+        if self._scrubbing or (self.player is not None and self.player.seek_busy):
+            return  # mpv still reports the position before the seek; the requested frame is the truth
         self._pos = t
         self.timeline.set_position(t, follow=not self._paused)
         self._update_labels()
@@ -853,15 +868,41 @@ class MainWindow(QMainWindow):
         key = " K" if idx.exact and idx.is_keyframe(f) else ""
         self.l_frame.setText(f"#{f}{key}")
 
-    def seek(self, t: float) -> None:
+    def seek(self, t: float, precise: bool = True) -> None:
         if not self.doc.has_video or self.player is None:
             return
         f = self.doc.frame_at(max(0.0, t))
         t = self.doc.time_of(f)
         self._pos = t
-        self.player.seek(t)
-        self.timeline.set_position(t, follow=True)
+        self._last_seek = (t, precise)
+        self.player.seek(t, precise)
+        self.timeline.set_position(t, follow=True, margin=0)
         self._update_labels()
+
+    def scrub(self, t: float) -> None:
+        """Playhead dragged: the timeline follows the mouse at once; the picture uses keyframe seeks
+        while the mouse moves fast and an exact seek as soon as it slows down or rests."""
+        now = time.monotonic()
+        last_wall, last_t = self._scrub_last
+        if self._scrubbing and now > last_wall:
+            rate = abs(t - last_t) / (now - last_wall)
+            self._scrub_speed = 0.6 * self._scrub_speed + 0.4 * rate
+        else:
+            self._scrub_speed = 0.0
+        self._scrub_last = (now, t)
+        self._scrubbing = True
+        self.seek(t, precise=self._scrub_speed < SCRUB_FAST)
+        self._scrub_settle.start()
+
+    def _scrub_exact(self) -> None:
+        if self._scrubbing and self._last_seek != (self._pos, True):
+            self.seek(self._pos)
+
+    def scrub_end(self, t: float) -> None:
+        self._scrub_settle.stop()
+        self._scrubbing = False
+        if self._last_seek != (self.doc.time_of(self.doc.frame_at(max(0.0, t))), True):
+            self.seek(t)
 
     def seek_frame(self, f: int) -> None:
         if self.doc.has_video:

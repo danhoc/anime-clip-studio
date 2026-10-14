@@ -75,7 +75,9 @@ def _sync_colors() -> None:
 
 
 class Timeline(QWidget):
-    seek_requested = Signal(float)
+    seek_requested = Signal(float)        # click: exact seek
+    scrub_moved = Signal(float)           # dragging the playhead
+    scrub_finished = Signal(float)        # drag released
     hint = Signal(str)
     zoom_to_clip_requested = Signal()
     context_action = Signal(str, float)   # action id, time
@@ -147,12 +149,14 @@ class Timeline(QWidget):
             self.wave_ref = 255.0
         self.update()
 
-    def set_position(self, t: float, follow: bool = False) -> None:
+    def set_position(self, t: float, follow: bool = False, margin: int = 20) -> None:
+        """follow: scroll when the playhead leaves the view (or comes within `margin` px of its right
+        edge — playback pages ahead; manual seeks pass 0 so a click near the edge does not jump)."""
         old_x = self.t2x(self.position)
         self.position = t
         if follow and self.doc.has_video:
             x = self.t2x(t)
-            if x < 0 or x > self.width() - 20:
+            if x < 0 or x > self.width() - margin:
                 pps = self.pps
                 self.doc._set_view(self.doc.project.view.pps, self._clamp_scroll(t - 0.1 * self.width() / pps, pps))
                 return
@@ -640,7 +644,7 @@ class Timeline(QWidget):
                 ids = [hit["cid"]]
             self.doc.select_clips(ids)
             self._seek_x(ev.position().x())
-            self._drag = {"kind": "scrub"}
+            self._drag = {"kind": "scrub", "moved": False}
         elif kind == "marker":
             m = self.doc.project.marker_by_id(hit["mid"])
             self.doc.select_markers([m.id])
@@ -649,16 +653,17 @@ class Timeline(QWidget):
             if not ctrl:
                 self.doc.clear_selection()
             self._seek_x(ev.position().x())
-            self._drag = {"kind": "scrub"}
+            self._drag = {"kind": "scrub", "moved": False}
         self.update()
 
-    def _seek_x(self, x: float):
+    def _x_time(self, x: float) -> float:
         idx = self.doc.index
-        f = idx.nearest_frame(self.x2t(max(0.0, x)))
-        t = idx.time_of(f)
-        self.position = t
+        return idx.time_of(idx.nearest_frame(self.x2t(max(0.0, x))))
+
+    def _seek_x(self, x: float):
+        t = self._x_time(x)
+        self.set_position(t)
         self.seek_requested.emit(t)
-        self.update()
 
     def mouseMoveEvent(self, ev):
         pos = ev.position()
@@ -671,7 +676,11 @@ class Timeline(QWidget):
             return
         kind = d["kind"]
         if kind == "scrub":
-            self._seek_x(pos.x())
+            t = self._x_time(pos.x())
+            if t != self.position:
+                d["moved"] = True
+                self.set_position(t)
+                self.scrub_moved.emit(t)
         elif kind == "pan":
             pps = self.pps
             self.doc._set_view(self.doc.project.view.pps,
@@ -700,6 +709,10 @@ class Timeline(QWidget):
         d = self._drag
         self._drag = None
         if d is None:
+            return
+        if d["kind"] == "scrub":
+            if d["moved"]:
+                self.scrub_finished.emit(self.position)
             return
         if d["kind"] in ("clip_in", "clip_out"):
             pin, pout = d["preview"]

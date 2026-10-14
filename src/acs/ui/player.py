@@ -3,14 +3,18 @@
 Threading rule: python-mpv's own event thread is NOT started. That thread converted libmpv event
 structures with ctypes concurrently with the GUI thread and crashed the interpreter (access
 violations in python313.dll / mpv.node_cast_value). Instead everything runs on the GUI thread:
-a QTimer polls time-pos / pause / duration with plain synchronous property reads, commands are
-synchronous, and the client's event queue is drained without decoding the events.
+a QTimer drains the client's event queue. time-pos / pause / duration are *observed* (mpv pushes
+changes as events, read here with a minimal ctypes struct, never python-mpv's node decoders), so
+polling never waits for a busy mpv core. Seeks are sent asynchronously and merged: at most one is
+in flight, newer requests replace the waiting one.
 """
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -21,7 +25,20 @@ from acs.core import trace
 log = logging.getLogger("acs.player")
 
 _mpv_module = None
-POLL_MS = 15
+POLL_FAST_MS = 15      # playing, seeking or right after a command
+POLL_IDLE_MS = 60      # paused, nothing happening
+POLL_EMPTY_MS = 250    # no file loaded
+FAST_AFTER_CMD = 1.0   # seconds of fast polling after a command
+SEEK_TIMEOUT = 0.3     # a seek with no "playback restart" event counts as done after this
+
+_OBS_TIME, _OBS_PAUSE, _OBS_DURATION = 1, 2, 3
+_FMT_FLAG, _FMT_DOUBLE = 3, 5
+
+
+class _PropEvent(ctypes.Structure):
+    """mpv_event_property: {const char *name; mpv_format format; void *data}."""
+
+    _fields_ = [("name", ctypes.c_char_p), ("format", ctypes.c_int), ("data", ctypes.c_void_p)]
 
 
 def load_mpv(libmpv_path: str):
@@ -104,8 +121,26 @@ class MpvPlayer(QWidget):
         self._seen_time: float | None = None
         self._seen_pause: bool | None = None
         self._seen_duration: float | None = None
+        # latest values pushed by mpv (observed properties)
+        self._time: float | None = None
+        self._pause: bool | None = None
+        self._duration: float | None = None
+        self._crop: str | None = None
+        self._seek_want: tuple[float, bool] | None = None   # newest request not sent yet
+        self._seek_sent: float | None = None                # monotonic time of the seek in flight
+        self._fast_until = 0.0
+        self._ev = getattr(self.mpv, "_event_handle", None)
+        self._observing = False
+        if self._ev:
+            try:
+                for uid, name, fmt in ((_OBS_TIME, b"time-pos", _FMT_DOUBLE), (_OBS_PAUSE, b"pause", _FMT_FLAG),
+                                       (_OBS_DURATION, b"duration", _FMT_DOUBLE)):
+                    self._lib._mpv_observe_property(self._ev, uid, name, fmt)  # noqa: SLF001
+                self._observing = True
+            except Exception as e:  # noqa: BLE001 - fall back to synchronous property reads
+                trace.log("player", f"observe_property failed, polling instead: {e}")
         self._poll = QTimer(self)
-        self._poll.setInterval(POLL_MS)
+        self._poll.setInterval(POLL_EMPTY_MS)
         self._poll.timeout.connect(self._poll_state)
         self._poll.start()
 
@@ -117,51 +152,129 @@ class MpvPlayer(QWidget):
             return None
 
     def _drain_events(self) -> None:
-        """Discard queued client events (we poll properties instead of decoding events)."""
-        handle = getattr(self.mpv, "_event_handle", None)
-        if not handle:
+        """Handle queued client events: observed property changes and seek completion."""
+        if not self._ev:
             return
-        none_id = self._lib.MpvEventID.NONE
+        ids = self._lib.MpvEventID
         for _ in range(256):
-            ev = self._lib._mpv_wait_event(handle, 0).contents  # noqa: SLF001
-            if ev.event_id.value == none_id:
+            ev = self._lib._mpv_wait_event(self._ev, 0).contents  # noqa: SLF001
+            eid = ev.event_id.value
+            if eid == ids.NONE:
                 break
+            if eid == ids.PROPERTY_CHANGE and ev._data:  # noqa: SLF001
+                self._on_property(int(ev.reply_userdata), ev._data)  # noqa: SLF001
+            elif eid == ids.PLAYBACK_RESTART:
+                self._seek_sent = None
+
+    def _on_property(self, uid: int, ptr: int) -> None:
+        p = ctypes.cast(ptr, ctypes.POINTER(_PropEvent)).contents
+        if uid == _OBS_PAUSE:
+            if p.data and p.format == _FMT_FLAG:
+                self._pause = bool(ctypes.c_int.from_address(p.data).value)
+            return
+        value = ctypes.c_double.from_address(p.data).value if p.data and p.format == _FMT_DOUBLE else None
+        if uid == _OBS_TIME:
+            self._time = value
+        elif uid == _OBS_DURATION:
+            self._duration = value
+
+    def _read_sync(self) -> None:
+        """Fallback when properties cannot be observed (old python-mpv / libmpv)."""
+        self._duration = self._prop("duration")
+        self._pause = self._prop("pause")
+        self._time = self._prop("time_pos")
 
     def _poll_state(self) -> None:
         if not self._alive:
             return
         self._drain_events()
+        self._pump_seek()
+        self._retime()
         if not self._path:
             return
-        d = self._prop("duration")
+        if not self._observing:
+            self._read_sync()
+        d = self._duration
         if d is not None and d != self._seen_duration:
             self._seen_duration = float(d)
             trace.log("player", f"file loaded, duration={d:.3f}")
             self.duration_changed.emit(float(d))
             self.file_loaded.emit()
-        p = self._prop("pause")
+        p = self._pause
         if p is not None and bool(p) != self._seen_pause:
             self._seen_pause = bool(p)
             trace.log("player", f"pause={bool(p)}")
             self.pause_changed.emit(bool(p))
-        t = self._prop("time_pos")
+        t = self._time
         if t is not None and t != self._seen_time:
             self._seen_time = float(t)
             trace.throttled("player.time", 1.0, "player", f"time={t:.3f}")
             self.time_changed.emit(float(t))
 
+    def _retime(self) -> None:
+        """Poll fast only while something can change (playback, seeks, recent commands)."""
+        if not self._path:
+            ms = POLL_EMPTY_MS
+        elif self._seen_pause is False or self.seek_busy or time.monotonic() < self._fast_until:
+            ms = POLL_FAST_MS
+        else:
+            ms = POLL_IDLE_MS
+        if self._poll.interval() != ms:
+            self._poll.setInterval(ms)
+
+    def _kick(self) -> None:
+        self._fast_until = time.monotonic() + FAST_AFTER_CMD
+        if self._poll.interval() != POLL_FAST_MS:
+            self._poll.setInterval(POLL_FAST_MS)
+
     def _cmd(self, *args: str) -> None:
+        self._kick()
         try:
             self.mpv.command(*args)
         except Exception as e:  # noqa: BLE001 - e.g. seek while nothing is loaded
             trace.log("player", f"command {args} failed: {e}")
 
+    def _cmd_async(self, name: str, *args: str) -> None:
+        """Queue a command without waiting for the mpv core; the reply event is drained and ignored."""
+        self._kick()
+        if not self._ev:
+            self._cmd(name, *args)
+            return
+        try:
+            arr = self._lib._create_null_term_cmd_arg_array(name, args)  # noqa: SLF001
+            self._lib._mpv_command_async(self._ev, 0, arr)  # noqa: SLF001
+        except Exception as e:  # noqa: BLE001
+            trace.log("player", f"async command {name} {args} failed: {e}")
+
+    # ---- seeking ----
+    @property
+    def seek_busy(self) -> bool:
+        """A seek is running or waiting; the reported time may still be the old position."""
+        return self._seek_want is not None or self._seek_in_flight()
+
+    def _seek_in_flight(self) -> bool:
+        if self._seek_sent is not None and time.monotonic() - self._seek_sent >= SEEK_TIMEOUT:
+            self._seek_sent = None
+        return self._seek_sent is not None
+
+    def _pump_seek(self) -> None:
+        if self._seek_want is None or self._seek_in_flight():
+            return
+        t, precise = self._seek_want
+        self._seek_want = None
+        self._seek_sent = time.monotonic()
+        trace.throttled("player.seek", 0.25, "player", f"seek {t:.3f} {'exact' if precise else 'keyframes'}")
+        self._cmd_async("seek", f"{t:.6f}", "absolute+exact" if precise else "absolute+keyframes")
+
     # ---- control ----
     def load(self, path: str, start: float = 0.0, aid: int | None = None, sid: int | None = None) -> None:
         trace.log("player", f"load {path!r} start={start:.3f} aid={aid} sid={sid}")
+        self._drain_events()   # values of the previous file must not count for this one
         self._path = path
         self._seen_duration = None
         self._seen_time = None
+        self._time = self._duration = None
+        self._seek_want = self._seek_sent = None
         self.mpv["start"] = f"{max(0.0, start):.6f}"
         self.mpv["pause"] = True
         self.mpv["aid"] = "auto" if aid is None else str(aid + 1)
@@ -171,27 +284,31 @@ class MpvPlayer(QWidget):
     def unload(self) -> None:
         trace.log("player", "unload")
         self._path = ""
+        self._seek_want = self._seek_sent = None
         self._cmd("stop")
 
     @property
     def paused(self) -> bool:
-        p = self._prop("pause")
+        p = self._pause if self._observing else self._prop("pause")
         return True if p is None else bool(p)
 
     def set_paused(self, paused: bool) -> None:
         trace.log("player", f"set_paused {paused}")
+        self._kick()
         self.mpv.pause = paused
 
     def toggle_pause(self) -> None:
         if not self._path:
             return
         trace.log("player", "toggle_pause")
+        self._kick()
         self.mpv.pause = not self.paused
 
-    def seek(self, t: float) -> None:
+    def seek(self, t: float, precise: bool = True) -> None:
+        """precise=False: nearest keyframe (instant, used while scrubbing); True: exact frame."""
         if self._path:
-            trace.throttled("player.seek", 0.25, "player", f"seek {t:.3f}")
-            self._cmd("seek", f"{max(0.0, t):.6f}", "absolute+exact")
+            self._seek_want = (max(0.0, t), precise)
+            self._pump_seek()
 
     def frame_step(self) -> None:
         if self._path:
@@ -228,6 +345,9 @@ class MpvPlayer(QWidget):
         self.mpv["sid"] = "no" if rel is None else str(rel + 1)
 
     def set_crop(self, mpv_rect: str | None) -> None:
+        if (mpv_rect or "") == self._crop:
+            return  # sent on every selection change; skip the synchronous call when nothing changes
+        self._crop = mpv_rect or ""
         trace.log("player", f"video-crop {mpv_rect or 'off'}")
         try:
             self.mpv["video-crop"] = mpv_rect or ""
