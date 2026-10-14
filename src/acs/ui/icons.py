@@ -87,8 +87,20 @@ def _paint(kind: str, p: QPainter, c: QColor) -> None:
         raise ValueError(kind)
 
 
+_cache: dict[tuple[str, str], QIcon] = {}
+
+
 def icon(kind: str, color: str | None = None) -> QIcon:
-    c = QColor(color or theme.current().text)
+    """Cached: e.g. play / pause is swapped on every pause change."""
+    key = (kind, color or theme.current().text)
+    cached = _cache.get(key)
+    if cached is None:
+        cached = _cache[key] = _render(kind, key[1])
+    return cached
+
+
+def _render(kind: str, color: str) -> QIcon:
+    c = QColor(color)
     pm = QPixmap(SIZE, SIZE)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)

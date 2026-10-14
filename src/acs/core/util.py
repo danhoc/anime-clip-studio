@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 IS_WINDOWS = sys.platform == "win32"
@@ -143,17 +144,35 @@ def norm_path_key(p: str | Path) -> str:
     return os.path.normcase(os.path.abspath(str(p)))
 
 
+_fp_cache: dict[tuple, str] = {}
+_fp_lock = threading.Lock()
+
+
 def file_fingerprint(path: str | Path, chunk: int = 4 * 1024 * 1024) -> str:
-    """sha1 of size + first and last `chunk` bytes. Cheap identity for large video files."""
+    """sha1 of size + first and last `chunk` bytes. Cheap identity for large video files.
+
+    Remembered per (path, size, mtime): opening a video asks for it several times (project,
+    thumbnail and waveform caches), and each call would otherwise read 8 MB from disk."""
     p = Path(path)
-    size = p.stat().st_size
+    st = p.stat()
+    key = (os.path.normcase(os.path.abspath(str(p))), st.st_size, st.st_mtime_ns, chunk)
+    with _fp_lock:
+        hit = _fp_cache.get(key)
+    if hit is not None:
+        return hit
+    size = st.st_size
     h = hashlib.sha1(str(size).encode())
     with open(p, "rb") as f:
         h.update(f.read(chunk))
         if size > chunk:
             f.seek(max(chunk, size - chunk))
             h.update(f.read(chunk))
-    return h.hexdigest()
+    digest = h.hexdigest()
+    with _fp_lock:
+        if len(_fp_cache) > 256:
+            _fp_cache.clear()
+        _fp_cache[key] = digest
+    return digest
 
 
 def safe_filename(name: str) -> str:

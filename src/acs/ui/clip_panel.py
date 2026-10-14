@@ -259,6 +259,9 @@ class ClipPanel(QWidget):
         p = self.doc.project
         info = self.doc.info
         self.table.blockSignals(True)
+        # Columns resize to their contents: every changed cell makes the header re-measure the column,
+        # so unchanged cells are left alone and repainting waits until the table is filled.
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(p.clips))
         for row, c in enumerate(p.clips):
             s = summarize(p, self.presets, info, c, self.settings)
@@ -287,18 +290,24 @@ class ClipPanel(QWidget):
                 it = self.table.item(row, col)
                 if it is None:
                     it = QTableWidgetItem()
+                    flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
+                    if col == 1:
+                        flags |= Qt.ItemFlag.ItemIsEditable
+                    it.setFlags(flags)
+                    if col == 0:
+                        it.setForeground(Qt.GlobalColor.white)
                     self.table.setItem(row, col, it)
-                it.setText(v)
-                it.setData(Qt.ItemDataRole.UserRole, c.id)
-                flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
-                if col == 1:
-                    flags |= Qt.ItemFlag.ItemIsEditable
-                it.setFlags(flags)
+                if it.text() != v:
+                    it.setText(v)
+                if it.data(Qt.ItemDataRole.UserRole) != c.id:
+                    it.setData(Qt.ItemDataRole.UserRole, c.id)
                 if col == 0:
-                    it.setForeground(Qt.GlobalColor.white)
-                    it.setBackground(QColor(c.color or "#4f9dff"))
-                if col == len(vals) - 1:
+                    bg = QColor(c.color or "#4f9dff")
+                    if it.background().color() != bg:
+                        it.setBackground(bg)
+                if col == len(vals) - 1 and it.toolTip() != tip:
                     it.setToolTip(tip)
+        self.table.setUpdatesEnabled(True)
         self.table.blockSignals(False)
         self.table.setVisible(bool(p.clips))
         self.empty_hint.setVisible(not p.clips)

@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QSize, Qt, QTimer
@@ -28,7 +29,7 @@ from acs.core.model import CropRect, Project
 from acs.core.presets import CODECS, PresetStore
 from acs.core.probe import ProbeError, probe, scan_packets
 from acs.core.project_io import (PROJECT_EXT, ProjectLoadError, find_autosave, load_project, remap_frames,
-                                 resolve_video, save_project, write_autosave)
+                                 resolve_video, save_project, write_autosave_data)
 from acs.core.timebase import FrameIndex
 from acs.core.tools import quick_ok
 from acs.core.util import file_fingerprint, fmt_time
@@ -80,6 +81,8 @@ class MainWindow(QMainWindow):
         self._scrub_last = (0.0, 0.0)    # (monotonic time, video time) of the previous scrub step
         self._last_seek: tuple[float, bool] | None = None   # (time, precise) of the newest seek request
         self._autosave_pending = False
+        # One writer thread: autosaves (with fsync) never block the UI and stay in order.
+        self._autosave_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="autosave")
         self._shortcuts_dlg: ShortcutsDialog | None = None
         self.setWindowTitle(APP_TITLE)
         self.resize(1500, 950)
@@ -295,7 +298,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._initial_split_sizes)
 
         # ---- docks ----
-        self.library = LibraryPanel(self.settings)
+        self.library = LibraryPanel(self.settings, self.dispatch)
         self.d_library = QDockWidget(tr("Library"), self)
         self.d_library.setObjectName("dock_library")
         self.d_library.setWidget(self.library)
@@ -470,7 +473,7 @@ class MainWindow(QMainWindow):
         self.library.frames_requested.connect(self.extract_frames)
         self.library.folders_changed.connect(lambda _f: self.settings.save())
         self.doc.project_changed.connect(self._schedule_autosave)
-        self.doc.view_changed.connect(self._schedule_autosave)
+        self.doc.view_changed.connect(lambda: self._schedule_autosave(title=False))
         self.doc.dirty_changed.connect(lambda _d: self._update_title())
         self.queue.job_finished.connect(self._job_finished)
         self.doc.undo.indexChanged.connect(self._trace_undo)
@@ -599,7 +602,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_TITLE, tr("This file has no video stream."))
             return
         if self.doc.has_video:
-            self._autosave()
+            self._autosave(wait=True)
         if project is None:
             auto = find_autosave(path)
             if auto is not None:
@@ -790,7 +793,7 @@ class MainWindow(QMainWindow):
         trace.log("project", f"saved {path!r} clips={len(p.clips)} markers={len(p.markers)}")
         self.doc.project_path = path
         self.doc.mark_saved()
-        write_autosave(p)
+        self._autosave(wait=True)
         self.settings.add_recent(path)
         self.settings.save()
         recovery.write_lock(path, p.video.path)
@@ -798,22 +801,40 @@ class MainWindow(QMainWindow):
         self._update_title()
         return True
 
-    def _schedule_autosave(self) -> None:
+    def _schedule_autosave(self, title: bool = True) -> None:
         if self.doc.has_video:
             self._autosave_pending = True
             self._autosave_timer.start()
-            self._update_title()
+            if title:   # zoom / scroll changes do not affect the title
+                self._update_title()
 
-    def _autosave(self) -> None:
+    def _autosave(self, wait: bool = False) -> None:
+        """Serialise now (GUI thread), write on the autosave thread; `wait` blocks until written."""
         if not self.doc.has_video:
             return
-        self.doc.project.view.position = self._pos
+        p = self.doc.project
+        p.view.position = self._pos
+        if not p.video.path:
+            return
+        path, data, n_clips = p.video.path, p.to_dict(), len(p.clips)
+        self._autosave_pending = False
+        post, badge = self.dispatch.post, self.library.update_badge
+
+        def write():
+            try:
+                write_autosave_data(path, data)
+            except OSError as e:
+                log.warning("autosave failed: %s", e)
+                return
+            post(badge, path, n_clips)
+
         try:
-            write_autosave(self.doc.project)
-            self._autosave_pending = False
-            self.library.update_badge(self.doc.project.video.path)
-        except OSError as e:
-            log.warning("autosave failed: %s", e)
+            fut = self._autosave_writer.submit(write)
+        except RuntimeError:   # writer already shut down (window closing): write here
+            write()
+            return
+        if wait:
+            fut.result()
 
     def _snapshot(self, reason: str) -> None:
         if not self.doc.has_video:
@@ -1421,7 +1442,8 @@ class MainWindow(QMainWindow):
             return  # nothing cancelled yet: the jobs keep running
         if jobs_running:
             self.queue.cancel_all()
-        self._autosave()
+        self._autosave(wait=True)
+        self._autosave_writer.shutdown(wait=True)
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         self.settings.window_state = bytes(self.saveState(DOCK_STATE_VERSION).toBase64()).decode()
         self.settings.splitter_sizes = {"v": self.split.sizes(), "h": self.top_split.sizes()}

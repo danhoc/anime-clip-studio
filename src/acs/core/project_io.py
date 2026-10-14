@@ -51,8 +51,13 @@ def autosave_path(video_path: str) -> Path:
 def write_autosave(project: Project) -> Path | None:
     if not project.video.path:
         return None
-    p = autosave_path(project.video.path)
-    atomic_write_json(p, project.to_dict())
+    return write_autosave_data(project.video.path, project.to_dict())
+
+
+def write_autosave_data(video_path: str, data: dict) -> Path:
+    """Write an already serialised project (lets the caller do the disk I/O on a worker thread)."""
+    p = autosave_path(video_path)
+    atomic_write_json(p, data)
     return p
 
 

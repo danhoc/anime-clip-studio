@@ -25,17 +25,32 @@ PATH_ROLE = Qt.ItemDataRole.UserRole
 KIND_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
+def _autosave_clips(path: str) -> int | None:
+    """Clip count of the video's autosave, None when it has none (safe on worker threads)."""
+    auto = find_autosave(path)
+    if auto is None:
+        return None
+    data = read_json(auto, {}) or {}
+    return len(data.get("clips", []))
+
+
+def _files(node: FolderNode):
+    yield from node.files
+    for sub in node.folders:
+        yield from _files(sub)
+
+
 class LibraryPanel(QWidget):
     open_requested = Signal(str)
     frames_requested = Signal(str)
     folders_changed = Signal(list)
 
-    def __init__(self, settings, parent=None):
+    def __init__(self, settings, dispatch: MainThreadDispatcher | None = None, parent=None):
         super().__init__(parent)
         self.settings = settings
         self.meta_cache = MetaCache()
         # Worker results come back through a plain queue (see ui/dispatch.py), not Qt signals.
-        self._dispatch = MainThreadDispatcher(self)
+        self._dispatch = dispatch or MainThreadDispatcher(self)
         self._scan_gen = 0
         self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="meta")
         self._items: dict[str, QTreeWidgetItem] = {}
@@ -139,7 +154,7 @@ class LibraryPanel(QWidget):
         exts = list(self.settings.video_exts)
         self._scan_gen += 1
         gen = self._scan_gen
-        post, on_scanned = self._dispatch.post, self._on_scanned
+        post, on_scanned, meta_cache = self._dispatch.post, self._on_scanned, self.meta_cache
         for root in folders:
             item = QTreeWidgetItem([os.path.basename(root) or root, "", "", "", ""])
             item.setData(0, PATH_ROLE, root)
@@ -152,12 +167,14 @@ class LibraryPanel(QWidget):
             def work(r=root):
                 trace.log("library", f"scan started {r!r}")
                 node = scan_folder(r, exts)
+                # Disk lookups per file (autosave badge, cached metadata) happen here, not on the GUI thread.
+                info = {f: (_autosave_clips(f), meta_cache.get(f)) for f in _files(node)}
                 trace.log("library", f"scan finished {r!r}: {node.count()} videos")
-                post(on_scanned, r, node, gen)
+                post(on_scanned, r, node, gen, info)
 
             threading.Thread(target=work, daemon=True).start()
 
-    def _on_scanned(self, root: str, node: FolderNode, gen: int) -> None:
+    def _on_scanned(self, root: str, node: FolderNode, gen: int, info: dict) -> None:
         if gen != self._scan_gen:
             return  # a newer refresh replaced the tree
         item = self._items.get("root:" + root)
@@ -166,12 +183,16 @@ class LibraryPanel(QWidget):
         item.setText(1, "")
         if Path(root).is_dir():
             self._watcher.addPath(root)
-        self._fill(item, node)
-        item.setExpanded(True)
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self._fill(item, node, info)
+            item.setExpanded(True)
+        finally:
+            self.tree.setUpdatesEnabled(True)
         self._apply_filter(self.search.text())
         self.highlight(self._current)
 
-    def _fill(self, parent: QTreeWidgetItem, node: FolderNode) -> None:
+    def _fill(self, parent: QTreeWidgetItem, node: FolderNode, info: dict) -> None:
         for sub in node.folders:
             it = QTreeWidgetItem([sub.name, "", "", "", ""])
             it.setData(0, PATH_ROLE, sub.path)
@@ -180,7 +201,7 @@ class LibraryPanel(QWidget):
             parent.addChild(it)
             if Path(sub.path).is_dir():
                 self._watcher.addPath(sub.path)
-            self._fill(it, sub)
+            self._fill(it, sub, info)
         for f in node.files:
             it = QTreeWidgetItem([os.path.basename(f), "", "", "", ""])
             it.setData(0, PATH_ROLE, f)
@@ -188,8 +209,8 @@ class LibraryPanel(QWidget):
             it.setToolTip(0, f)
             parent.addChild(it)
             self._items[os.path.normcase(f)] = it
-            self._badge(it, f)
-            meta = self.meta_cache.get(f)
+            clips, meta = info.get(f, (None, None))
+            self._set_badge(it, clips)
             if meta is not None:
                 self._show_meta(it, meta)
             else:
@@ -220,20 +241,19 @@ class LibraryPanel(QWidget):
         path = it.data(0, PATH_ROLE)
         it.setToolTip(0, f"{path}\n{m.resolution()} {m.codec}{depth} · {fmt_duration(m.duration)} · {tracks}")
 
-    def _badge(self, it: QTreeWidgetItem, path: str) -> None:
-        auto = find_autosave(path)
-        if auto is None:
+    @staticmethod
+    def _set_badge(it: QTreeWidgetItem, clips: int | None) -> None:
+        if clips is None:
             it.setText(4, "")
             return
-        data = read_json(auto, {}) or {}
-        n = len(data.get("clips", []))
-        it.setText(4, f"● {n}")
+        it.setText(4, f"● {clips}")
         it.setToolTip(4, tr("Has saved work (autosave) with this many clips"))
 
-    def update_badge(self, path: str) -> None:
+    def update_badge(self, path: str, clips: int | None = None) -> None:
+        """`clips` = number of clips just autosaved; None = read it from the autosave file."""
         it = self._items.get(os.path.normcase(path))
         if it is not None:
-            self._badge(it, path)
+            self._set_badge(it, _autosave_clips(path) if clips is None else clips)
 
     def highlight(self, path: str) -> None:
         self._current = path

@@ -41,6 +41,37 @@ class _PropEvent(ctypes.Structure):
     _fields_ = [("name", ctypes.c_char_p), ("format", ctypes.c_int), ("data", ctypes.c_void_p)]
 
 
+def _total_ram() -> int:
+    """Physical memory in bytes (0 if unknown)."""
+    if os.name != "nt":
+        return 0
+
+    class MEMORYSTATUSEX(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    try:
+        st = MEMORYSTATUSEX()
+        st.dwLength = ctypes.sizeof(st)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return int(st.ullTotalPhys)
+    except (OSError, AttributeError):
+        pass
+    return 0
+
+
+def demuxer_cache() -> tuple[str, str]:
+    """(forward, back) demuxer cache: generous normally, smaller below 8 GB of RAM so the cache
+    (up to 1 GiB for one episode) does not push the system into swapping."""
+    ram = _total_ram()
+    if 0 < ram < 8 * 1000 ** 3:
+        return "256MiB", "128MiB"
+    return "512MiB", "512MiB"
+
+
 def load_mpv(libmpv_path: str):
     """Import python-mpv with our bundled libmpv-2.dll on the DLL search path."""
     global _mpv_module
@@ -73,6 +104,7 @@ class MpvPlayer(QWidget):
         self.setStyleSheet("background: black;")
         self.setMinimumSize(320, 180)
         self._lib = load_mpv(libmpv_path)
+        cache_fwd, cache_back = demuxer_cache()
         opts = dict(
             wid=str(int(self.winId())),
             config=False,
@@ -88,8 +120,8 @@ class MpvPlayer(QWidget):
             input_vo_keyboard=False,
             input_cursor=False,
             cursor_autohide="no",
-            demuxer_max_bytes="512MiB",
-            demuxer_max_back_bytes="512MiB",
+            demuxer_max_bytes=cache_fwd,
+            demuxer_max_back_bytes=cache_back,
             cache="yes",
             sub_auto="no",
             audio_file_auto="no",
