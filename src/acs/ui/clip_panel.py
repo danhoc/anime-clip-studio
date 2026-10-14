@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QSpinBox,
                                QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from acs.core.clipinfo import effective_audio, effective_preset, summarize
+from acs.core.clipinfo import effective_audio, summarize
 from acs.core.document import ProjectDocument
 from acs.core.model import CropRect
 from acs.core.ffmpeg_cmd import available_heights
@@ -44,8 +44,7 @@ class ClipPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
 
-        # ---- project defaults row ----
-        defaults = QHBoxLayout()
+        # ---- project defaults (placed by the main window in the side column, under the clip) ----
         self.def_preset = QComboBox()
         self.def_preset.setToolTip(tr("Preset used by clips that do not override it"))
         self.def_audio = QComboBox()
@@ -55,24 +54,27 @@ class ClipPanel(QWidget):
         self.out_dir = QLineEdit()
         self.out_dir.setPlaceholderText(tr("Output folder"))
         self.out_dir.setToolTip(tr("Where exported clips are saved"))
-        self.out_dir.setMinimumWidth(180)
         browse = QPushButton("…")
         browse.setFixedWidth(28)
         browse.setToolTip(tr("Choose output folder"))
         edit_presets = QPushButton(tr("Presets…"))
         edit_presets.setToolTip(tr("Create and edit your own export presets"))
-        defaults.addWidget(QLabel(tr("Default preset:")))
-        defaults.addWidget(self.def_preset, 3)
-        defaults.addWidget(edit_presets)
-        defaults.addWidget(QLabel(tr("Audio:")))
-        defaults.addWidget(self.def_audio, 2)
-        defaults.addWidget(QLabel(tr("Subtitles:")))
-        defaults.addWidget(self.def_sub, 2)
-        defaults.addWidget(QLabel(tr("Output:")))
-        defaults.addWidget(self.out_dir, 3)
-        defaults.addWidget(browse)
-        root.addLayout(defaults)
-
+        # Long preset / track names must not widen the side column: the combos shrink and elide.
+        for combo in (self.def_preset, self.def_audio, self.def_sub):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(8)
+        self.defaults_box = QGroupBox(tr("Project"))
+        dform = QFormLayout(self.defaults_box)
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(self.def_preset, 1)
+        preset_row.addWidget(edit_presets)
+        out_row = QHBoxLayout()
+        out_row.addWidget(self.out_dir, 1)
+        out_row.addWidget(browse)
+        dform.addRow(tr("Default preset"), preset_row)
+        dform.addRow(tr("Audio"), self.def_audio)
+        dform.addRow(tr("Subtitles"), self.def_sub)
+        dform.addRow(tr("Output"), out_row)
 
         # ---- table ----
         self.table = QTableWidget(0, len(COLS))

@@ -111,8 +111,8 @@ RU: dict[str, str] = {
     "Next": "Далее",
     "Finish": "Готово",
     # ---- main window ----
-    "Add a folder with videos in the Library (left)\nor drag a video / .acsproj file here.\n\nF1 — keyboard shortcuts":
-        "Добавьте папку с видео в Медиатеке (слева)\nили перетащите сюда видео / файл .acsproj.\n\nF1 — горячие клавиши",
+    "Add a folder with videos in the Library (right)\nor drag a video / .acsproj file here.\n\nF1 — keyboard shortcuts":
+        "Добавьте папку с видео в Медиатеке (справа)\nили перетащите сюда видео / файл .acsproj.\n\nF1 — горячие клавиши",
     "The video player (libmpv) could not be started:": "Не удалось запустить видеоплеер (libmpv):",
     "Check the libmpv-2.dll path in Settings.": "Проверьте путь к libmpv-2.dll в Настройках.",
     "Current time / duration": "Текущее время / длительность",
@@ -200,10 +200,6 @@ RU: dict[str, str] = {
     "Choose output folder": "Выбрать папку вывода",
     "Presets…": "Пресеты…",
     "Create and edit your own export presets": "Создавайте и редактируйте свои пресеты экспорта",
-    "Default preset:": "Пресет по умолчанию:",
-    "Audio:": "Аудио:",
-    "Subtitles:": "Субтитры:",
-    "Output:": "Вывод:",
     "No clips yet. Press I to set In, O to set Out — repeat for more clips.":
         "Клипов пока нет. I — начало, O — конец; повторяйте для новых клипов.",
     "Selected clip": "Выбранный клип",

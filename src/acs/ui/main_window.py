@@ -9,11 +9,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QFont, QFontMetrics, QKeySequence
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout,
-                               QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSlider, QSplitter,
-                               QStackedWidget, QStyle, QToolButton, QUndoView, QVBoxLayout, QWidget)
+from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup, QFont, QFontMetrics, QKeySequence
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout, QLabel,
+                               QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSplitter,
+                               QStackedWidget, QToolButton, QUndoView, QVBoxLayout, QWidget)
 
 from acs import APP_TITLE, __version__
 from acs.core import mpv_markers, recovery, trace
@@ -39,6 +39,7 @@ from acs.ui import icons, theme
 from acs.ui.clip_panel import ClipPanel
 from acs.ui.dispatch import MainThreadDispatcher
 from acs.ui.export_dialog import ExportDialog
+from acs.ui.flow_layout import FlowLayout
 from acs.ui.frames_dialog import FramesDialog
 from acs.ui.help import ShortcutsDialog, TourOverlay
 from acs.ui.hotkeys import key_for, with_key
@@ -49,7 +50,7 @@ from acs.ui.queue_panel import QueuePanel
 from acs.ui.recovery_dialog import RecoveryDialog
 from acs.ui.settings_dialog import SettingsDialog
 from acs.ui.tools_panel import ToolsDialog
-from acs.ui.timeline import Timeline
+from acs.ui.timeline import SMALL_SCREEN_H, Timeline
 
 log = logging.getLogger("acs.ui")
 
@@ -57,6 +58,61 @@ DOCK_STATE_VERSION = 2  # bump when the default dock arrangement changes
 # Scrubbing: fast mouse moves seek to keyframes (instant), slow moves and rests seek exactly.
 SCRUB_SETTLE_MS = 120       # the mouse rests this long -> exact seek
 SCRUB_FAST = 3.0            # video seconds per wall-clock second above which keyframe seeks are used
+
+
+class TrackButton(QToolButton):
+    """Compact track picker for the transport bar: icon + short label, the full list in a menu."""
+
+    changed = Signal()
+
+    def __init__(self, icon_kind: str, tip: str, parent=None):
+        super().__init__(parent)
+        self.setIcon(icons.icon(icon_kind))
+        self.setIconSize(QSize(20, 20))
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setAutoRaise(True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._tip = tr(tip)
+        self.setToolTip(self._tip)
+        self._menu = QMenu(self)
+        self.setMenu(self._menu)
+        self._group = QActionGroup(self)
+        self._data = None
+
+    def clear(self) -> None:
+        for a in self._group.actions():
+            self._group.removeAction(a)
+        self._menu.clear()
+        self._data = None
+        self.setText("")
+        self.setToolTip(self._tip)
+
+    def add_item(self, label: str, data, short: str) -> None:
+        a = self._menu.addAction(label)
+        a.setCheckable(True)
+        a.setData((data, short))
+        self._group.addAction(a)
+        a.triggered.connect(lambda _checked=False, act=a: self._pick(act, emit=True))
+
+    def set_current(self, data) -> None:
+        """Select the item with this data (the first item when there is none, like a combo box)."""
+        acts = self._group.actions()
+        a = next((x for x in acts if x.data()[0] == data), acts[0] if acts else None)
+        if a is not None:
+            self._pick(a, emit=False)
+
+    def current_data(self):
+        return self._data
+
+    def _pick(self, a: QAction, emit: bool) -> None:
+        a.setChecked(True)
+        old = self._data
+        self._data, short = a.data()
+        self.setText(short)
+        self.setToolTip(f"{self._tip}: {a.text()}")
+        if emit and self._data != old:
+            self.changed.emit()
 
 
 class MainWindow(QMainWindow):
@@ -100,7 +156,7 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         # ---- player + empty state ----
         self.player_stack = QStackedWidget()
-        self.empty = QLabel(tr("Add a folder with videos in the Library (left)\n"
+        self.empty = QLabel(tr("Add a folder with videos in the Library (right)\n"
                                "or drag a video / .acsproj file here.\n\n"
                                "F1 — keyboard shortcuts"))
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -128,9 +184,20 @@ class MainWindow(QMainWindow):
                           f"#transport QToolButton#mark_in {{ color: {c_in}; border: 1px solid {c_in}; }}"
                           f"#transport QToolButton#mark_out {{ color: {c_out}; border: 1px solid {c_out}; }}"
                           f"#transport QToolButton#mark_marker {{ color: {c_mark}; border: 1px solid {c_mark}; }}")
-        bl = QHBoxLayout(bar)
-        bl.setContentsMargins(6, 4, 6, 4)
-        bl.setSpacing(4)
+        # Four groups (navigation, time, marking, tracks + export) in one row on wide screens; on narrow
+        # ones (1366 px, library open) the bar wraps onto a second row instead of widening the window.
+        flow = FlowLayout(bar, spacing=16)
+        flow.setContentsMargins(6, 4, 6, 4)
+
+        def group() -> QHBoxLayout:
+            g = QWidget()
+            lay = QHBoxLayout(g)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(4)
+            flow.addWidget(g)
+            return lay
+
+        bl = group()
 
         def tb(text: str, tip: str, action_id: str = "", icon_kind: str | None = None, bold: bool = False,
                name: str = "") -> QToolButton:
@@ -160,7 +227,7 @@ class MainWindow(QMainWindow):
         self.b_frame_next = tb("", "Next frame", "frame_next", "frame_next")
         self.b_sec_next = tb("+1s", "Forward 1 second", "sec_next")
         self.b_ep_next = tb("", "Next episode in folder", "ep_next", "ep_next")
-        bl.addSpacing(12)
+        bl = group()
         mono = "font-family: Consolas, 'Cascadia Mono', monospace; font-size: 17px;"
         self.l_time = QLabel("--:--:--.--- / --:--:--")
         self.l_time.setStyleSheet(mono)
@@ -182,36 +249,32 @@ class MainWindow(QMainWindow):
         self.l_frame.setFixedWidth(fm.horizontalAdvance("#00000000 K") + 6)
         for lab in (self.l_time, self.l_frame):
             lab.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        bl.addSpacing(16)
+        bl = group()
         self.b_in = tb("[  " + tr("Clip start") + "  I", "Set clip In (starts a new clip)", "set_in",
                        bold=True, name="mark_in")
         self.b_out = tb(tr("Clip end") + "  O  ]", "Set clip Out (current frame included)", "set_out",
                         bold=True, name="mark_out")
         self.b_marker = tb("⚑ " + tr("Marker") + "  M", "Add marker", "marker", bold=True, name="mark_marker")
-        bl.addStretch(1)
+        bl = group()
         self.l_speed = QLabel("")
         bl.addWidget(self.l_speed)
-        self.c_aid = QComboBox()
-        self.c_aid.setToolTip(tr("Audio track for preview"))
-        self.c_aid.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.c_sid = QComboBox()
-        self.c_sid.setToolTip(tr("Subtitles shown in the preview"))
-        self.c_sid.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-
-        def icon_label(kind: str, tip: str) -> QLabel:
-            lab = QLabel()
-            lab.setPixmap(icons.icon(kind).pixmap(QSize(20, 20)))
-            lab.setToolTip(tr(tip))
-            return lab
-
-        bl.addWidget(icon_label("volume", "Audio track for preview"))
+        # Compact pickers (icon + language, full track list in the menu) keep the bar narrow enough
+        # for 1366 / 1600 px wide screens.
+        self.c_aid = TrackButton("volume", "Audio track for preview")
+        self.c_sid = TrackButton("subtitles", "Subtitles shown in the preview")
         bl.addWidget(self.c_aid)
-        bl.addWidget(icon_label("subtitles", "Subtitles shown in the preview"))
         bl.addWidget(self.c_sid)
+        self.b_mute = QToolButton()
+        self.b_mute.setText("🔇")
+        self.b_mute.setCheckable(True)
+        self.b_mute.setAutoRaise(True)
+        self.b_mute.setToolTip(tr("Mute"))
+        self.b_mute.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        bl.addWidget(self.b_mute)
         self.vol = QSlider(Qt.Orientation.Horizontal)
         self.vol.setRange(0, 130)
         self.vol.setValue(80)
-        self.vol.setFixedWidth(90)
+        self.vol.setFixedWidth(70)
         self.vol.setToolTip(tr("Preview volume"))
         self.vol.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         bl.addWidget(self.vol)
@@ -227,54 +290,32 @@ class MainWindow(QMainWindow):
         self.b_export.setIconSize(QSize(18, 18))
         bl.addWidget(self.b_export)
 
-        player_area = QWidget()
-        tl = QVBoxLayout(player_area)
-        tl.setContentsMargins(0, 0, 0, 0)
-        tl.setSpacing(0)
-        tl.addWidget(self.player_stack, 1)
-        tl.addWidget(bar)
-
-        # ---- timeline + zoom bar ----
+        # ---- timeline (its zoom buttons sit in the ruler) ----
         self.timeline = Timeline(self.doc)
         screen = self.screen() or QApplication.primaryScreen()
-        if screen is not None:
-            self.timeline.configure_for_screen(screen.availableGeometry().height())
-        tlw = QWidget()
-        tll = QVBoxLayout(tlw)
-        tll.setContentsMargins(0, 0, 0, 0)
-        tll.setSpacing(0)
-        zb = QHBoxLayout()
-        zb.setContentsMargins(4, 0, 4, 0)
-        for text, tip, aid, fn in (("−", "Zoom timeline out", "zoom_out", lambda: self.timeline.zoom_at(1 / 1.5)),
-                                   ("+", "Zoom timeline in (also Ctrl+wheel)", "zoom_in",
-                                    lambda: self.timeline.zoom_at(1.5)),
-                                   ("⤢", "Fit whole video", "zoom_fit", self.timeline.zoom_fit),
-                                   ("◫", "Zoom to selected clip", "zoom_clip", self._zoom_clip)):
-            b = QToolButton()
-            b.setText(text)
-            b.setToolTip(with_key(tip, aid))
-            b.setAutoRaise(True)
-            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            b.clicked.connect(fn)
-            zb.addWidget(b)
+        screen_h = screen.availableGeometry().height() if screen is not None else 1080
+        self.timeline.configure_for_screen(screen_h)
         self.l_keys = QLabel("")
         self.l_keys.setStyleSheet(theme.css_dim())
-        zb.addWidget(self.l_keys)
-        zb.addStretch(1)
-        tll.addLayout(zb)
-        tll.addWidget(self.timeline)
 
         self.clip_panel = ClipPanel(self.doc, self.presets, self.settings)
 
-        # Selected-clip properties live in a side column next to the player: the video keeps its
-        # aspect ratio anyway, so this uses what would otherwise be black bars.
+        # Selected-clip properties and the project defaults live in a side column next to the player:
+        # the video keeps its aspect ratio anyway, so this uses what would otherwise be black bars.
+        side = QWidget()
+        sl = QVBoxLayout(side)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.addWidget(self.clip_panel.props)
+        sl.addWidget(self.clip_panel.defaults_box)
+        sl.addStretch(1)
         props_scroll = QScrollArea()
-        props_scroll.setWidget(self.clip_panel.props)
+        props_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        props_scroll.setWidget(side)
         props_scroll.setWidgetResizable(True)
         props_scroll.setFrameShape(QFrame.Shape.NoFrame)
         props_scroll.setMinimumWidth(320)
         self.top_split = QSplitter(Qt.Orientation.Horizontal)
-        self.top_split.addWidget(player_area)
+        self.top_split.addWidget(self.player_stack)
         self.top_split.addWidget(props_scroll)
         self.top_split.setStretchFactor(0, 4)
         self.top_split.setStretchFactor(1, 1)
@@ -283,17 +324,25 @@ class MainWindow(QMainWindow):
         # Player / timeline / clip table. The timeline's thumbnail and waveform rows have a fixed
         # height and sit right under the transport bar; dragging the handle below the timeline only
         # grows or shrinks its clip-lane area, so no empty gap can open between video and timeline.
-        self.clip_panel.setMinimumHeight(140)
+        self.clip_panel.setMinimumHeight(100 if screen_h < SMALL_SCREEN_H else 140)
+        # The transport bar spans the player and the side column, so it has the whole width for its
+        # single row (and wraps only when even that is not enough).
+        top = QWidget()
+        tv = QVBoxLayout(top)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(0)
+        tv.addWidget(self.top_split, 1)
+        tv.addWidget(bar)
         self.split = QSplitter(Qt.Orientation.Vertical)
-        self.split.addWidget(self.top_split)
-        self.split.addWidget(tlw)
+        self.split.addWidget(top)
+        self.split.addWidget(self.timeline)
         self.split.addWidget(self.clip_panel)
         self.split.setStretchFactor(0, 3)
         self.split.setStretchFactor(1, 0)
         self.split.setStretchFactor(2, 1)
         for i in range(3):
             self.split.setCollapsible(i, False)
-        self._timeline_block = tlw
+        self._timeline_block = self.timeline
         self.setCentralWidget(self.split)
         QTimer.singleShot(0, self._initial_split_sizes)
 
@@ -318,10 +367,11 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(self.d_library, self.d_queue)
         self.tabifyDockWidget(self.d_queue, self.d_history)
         self.d_library.raise_()
-        self.resizeDocks([self.d_library], [460], Qt.Orientation.Horizontal)
+        self.resizeDocks([self.d_library], [340 if screen_h < SMALL_SCREEN_H else 460], Qt.Orientation.Horizontal)
 
         self.hint = QLabel("")
         self.statusBar().addWidget(self.hint, 1)
+        self.statusBar().addPermanentWidget(self.l_keys)
         self.l_info = QLabel("")
         self.statusBar().addPermanentWidget(self.l_info)
 
@@ -457,9 +507,11 @@ class MainWindow(QMainWindow):
         self.b_marker.clicked.connect(self.add_marker)
         self.b_export.clicked.connect(self.export_clips)
         self.b_frames.clicked.connect(lambda: self.extract_frames(None))
-        self.c_aid.currentIndexChanged.connect(self._preview_aid_changed)
-        self.c_sid.currentIndexChanged.connect(self._preview_sid_changed)
+        self.c_aid.changed.connect(self._preview_aid_changed)
+        self.c_sid.changed.connect(self._preview_sid_changed)
         self.vol.valueChanged.connect(lambda v: self.player and self.player.set_volume(v))
+        self.b_mute.toggled.connect(lambda m: self.player and self.player.set_mute(m))
+        self.timeline.zoom_to_clip_requested.connect(self._zoom_clip)
         self.timeline.seek_requested.connect(self.seek)
         self.timeline.scrub_moved.connect(self.scrub)
         self.timeline.scrub_finished.connect(self.scrub_end)
@@ -1002,23 +1054,18 @@ class MainWindow(QMainWindow):
     def _fill_preview_tracks(self, aid, sid) -> None:
         info = self.doc.info
         for c in (self.c_aid, self.c_sid):
-            c.blockSignals(True)
             c.clear()
-        self.c_sid.addItem(tr("off"), None)
+        self.c_sid.add_item(tr("off"), None, tr("off"))
         if info is not None:
             for a in info.audios:
-                self.c_aid.addItem(a.label(), a.rel)
+                self.c_aid.add_item(a.label(), a.rel, f"#{a.rel + 1} {a.language}".strip())
             for s in info.subs:
-                self.c_sid.addItem(s.label(), s.rel)
-        i = self.c_aid.findData(aid)
-        self.c_aid.setCurrentIndex(max(0, i))
-        i = self.c_sid.findData(sid)
-        self.c_sid.setCurrentIndex(max(0, i))
-        for c in (self.c_aid, self.c_sid):
-            c.blockSignals(False)
+                self.c_sid.add_item(s.label(), s.rel, f"#{s.rel + 1} {s.language}".strip())
+        self.c_aid.set_current(aid)
+        self.c_sid.set_current(sid)
 
     def _preview_aid_changed(self) -> None:
-        rel = self.c_aid.currentData()
+        rel = self.c_aid.current_data()
         if self.player is not None:
             self.player.set_aid(rel)
         self.doc.project.view.aid = rel
@@ -1026,7 +1073,7 @@ class MainWindow(QMainWindow):
             self._start_waveform(self._token, self.doc.project.video.path, rel)
 
     def _preview_sid_changed(self) -> None:
-        rel = self.c_sid.currentData()
+        rel = self.c_sid.current_data()
         if self.player is not None:
             self.player.set_sid(rel)
         self.doc.project.view.sid = rel

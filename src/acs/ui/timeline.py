@@ -15,7 +15,7 @@ import math
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import QColorDialog, QInputDialog, QMenu, QSizePolicy, QWidget
+from PySide6.QtWidgets import QColorDialog, QHBoxLayout, QInputDialog, QMenu, QSizePolicy, QToolButton, QWidget
 
 from acs.core import trace
 from acs.core.document import ProjectDocument
@@ -24,6 +24,7 @@ from acs.core.util import fmt_time
 from acs.core.waveform import DEFAULT_BPS
 from acs.i18n import tr
 from acs.ui import theme
+from acs.ui.hotkeys import with_key
 
 RULER_H = 26
 LANE_H = 26
@@ -36,6 +37,7 @@ ROW_SIZES = (  # (min logical screen height, thumbnail row, waveform row)
     (0, 76, 60),
 )
 DEFAULT_LANES = 3                # minimum clip-lane area; the splitter can make it taller
+SMALL_SCREEN_H = 800             # logical screen height below which the lane minimum drops to 2
 CLICK_PX = 4                     # a press on a clip edge that moves less than this is a click (seek)
 WAVE_REF_PERCENTILE = 99.97     # auto gain reference: (almost) the loudest moment of the track
 WAVE_KNEE = 0.85                 # above this, peaks are compressed smoothly instead of clipped
@@ -92,6 +94,7 @@ class Timeline(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._row_sizes = ROW_SIZES[1][1:]
+        self._min_lanes = DEFAULT_LANES
         self.position = 0.0
         self.thumb_times: np.ndarray | None = None
         self._thumb_arr: np.ndarray | None = None     # [N, H, W, 3] as decoded
@@ -107,6 +110,7 @@ class Timeline(QWidget):
         _sync_colors()   # the theme only changes after a restart
         self._lanes: dict[str, int] = {}
         self._lane_count = 1
+        self._corner = self._build_corner()
         self._apply_min_height()
         doc.markers_changed.connect(self.update)
         doc.clips_changed.connect(self._relayout)
@@ -115,11 +119,43 @@ class Timeline(QWidget):
         doc.loaded.connect(self._on_loaded)
         doc.index_ready.connect(self.update)
 
+    def _build_corner(self) -> QWidget:
+        """Zoom buttons in the right end of the ruler (no separate toolbar row above the timeline)."""
+        corner = QWidget(self)
+        corner.setObjectName("tl_corner")
+        corner.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        corner.setStyleSheet(f"#tl_corner {{ background: {C_RULER.name()}; }}"
+                             "#tl_corner QToolButton { padding: 0px 5px; }")
+        lay = QHBoxLayout(corner)
+        lay.setContentsMargins(2, 0, 2, 0)
+        lay.setSpacing(0)
+        for text, tip, aid, fn in (("−", "Zoom timeline out", "zoom_out", lambda: self.zoom_at(1 / 1.5)),
+                                   ("+", "Zoom timeline in (also Ctrl+wheel)", "zoom_in", lambda: self.zoom_at(1.5)),
+                                   ("⤢", "Fit whole video", "zoom_fit", self.zoom_fit),
+                                   ("◫", "Zoom to selected clip", "zoom_clip", self.zoom_to_clip_requested.emit)):
+            b = QToolButton(corner)
+            b.setText(text)
+            b.setToolTip(with_key(tip, aid))
+            b.setAutoRaise(True)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setFixedHeight(RULER_H - 2)
+            b.clicked.connect(fn)
+            lay.addWidget(b)
+        corner.setFixedHeight(RULER_H)
+        corner.adjustSize()
+        corner.hide()   # shown once a video is open
+        return corner
+
+    def _place_corner(self) -> None:
+        self._corner.move(self.width() - self._corner.width(), 0)
+
     # ---- data feeds ----------------------------------------------------------------------
     def _on_loaded(self):
         self.thumb_times, self._thumb_arr, self.wave = None, None, None
         self._thumb_cache = {}
         self.position = self.doc.project.view.position
+        self._corner.setVisible(self.doc.has_video)
+        self._place_corner()
         self._relayout()
 
     def set_thumbnails(self, times: np.ndarray, images: np.ndarray) -> None:
@@ -268,11 +304,12 @@ class Timeline(QWidget):
             if logical_screen_height >= min_h:
                 self._row_sizes = (th, wh)
                 break
+        self._min_lanes = 2 if logical_screen_height < SMALL_SCREEN_H else DEFAULT_LANES
         self._apply_min_height()
 
     def _apply_min_height(self) -> None:
         """Rows above the lanes are fixed; only the clip-lane area below them may grow (splitter)."""
-        self.setMinimumHeight(self._clips_y + DEFAULT_LANES * (LANE_H + LANE_GAP) + 4)
+        self.setMinimumHeight(self._clips_y + self._min_lanes * (LANE_H + LANE_GAP) + 4)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
 
     def sizeHint(self):
@@ -285,8 +322,8 @@ class Timeline(QWidget):
 
     @property
     def _lanes_h(self) -> int:
-        """Height of the clip-lane area (at least DEFAULT_LANES full-size lanes)."""
-        return max(DEFAULT_LANES * (LANE_H + LANE_GAP), self.height() - self._clips_y - 4)
+        """Height of the clip-lane area (at least the minimum number of full-size lanes)."""
+        return max(self._min_lanes * (LANE_H + LANE_GAP), self.height() - self._clips_y - 4)
 
     def _lane_geom(self) -> tuple[float, float]:
         """(lane pitch, lane height): full size while the lanes fit, squeezed when clips overlap more."""
@@ -823,6 +860,7 @@ class Timeline(QWidget):
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
+        self._place_corner()
         self.update()
 
     def contextMenuEvent(self, ev):
