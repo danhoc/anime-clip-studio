@@ -366,7 +366,10 @@ Anime Clip Studio is free software: you can redistribute it and/or modify it und
 
 Libraries installed by uv keep their own licenses: PySide6 / Qt (LGPL-3.0), python-mpv (GPL-2.0+ or LGPL-2.1+),
 numpy (BSD-3-Clause), platformdirs (MIT). FFmpeg and mpv / libmpv are separate programs under LGPL / GPL (depending
-on the build) and are not distributed with this repository.
+on the build) and are not part of this repository. A ready-made archive passed on by the author may already contain
+`vendor/libmpv-2.dll` (the mpv build by shinchiro, GPL, redistributed unmodified); its license texts, exact version
+and links to the source code are in `vendor/licenses/mpv`. Such archives are made with
+[`packaging/make_dist.py`](packaging/make_dist.py).
 
 **Screenshots** show frames from the music video
 [*BIRDBRAIN (w/ OK Glass) feat. Kasane Teto*](https://www.youtube.com/watch?v=0iVlSNpq8i8) by **Jamie Paige**

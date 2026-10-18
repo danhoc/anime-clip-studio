@@ -3,3 +3,5 @@
 *.dll binary
 *.exe binary
 *.png binary
+# not needed in archives of the app (GitHub "Download ZIP", git archive)
+packaging export-ignore
