@@ -5,7 +5,11 @@ Mark any number of clips on one timeline, export them without quality loss (smar
 for Discord, YouTube Shorts, GIF or WebP, and save hundreds of frames with duplicates skipped.
 
 Windows 10 / 11 · English and Russian interface · free and open source ([GPL-3.0](LICENSE)) · a non-commercial
-project: no ads, no accounts, no telemetry, and the app never downloads anything by itself.
+project: no ads, no accounts, no telemetry, and nothing is downloaded without your consent.
+
+> **Disclaimer.** This app was created with the help of [Claude](https://claude.ai), an AI assistant by Anthropic.
+> The author has no experience in software development. The program is provided as is, without any warranty
+> (see the [license](LICENSE)); please report problems in [Issues](https://github.com/USERNAME/anime-clip-studio/issues).
 
 **[Русская версия →](README.ru.md)**
 
@@ -20,7 +24,7 @@ project: no ads, no accounts, no telemetry, and the app never downloads anything
     [Timeline](#timeline) · [Clips and their settings](#clips-and-their-settings) · [Shorts Mode](#shorts-mode) ·
     [Export](#export) · [Export presets](#export-presets) · [Frame extraction](#frame-extraction) ·
     [Marking while watching in mpv](#marking-while-watching-in-your-own-mpv) ·
-    [Autosave and crash recovery](#autosave-and-crash-recovery) · [Interface](#interface)
+    [Autosave and crash recovery](#autosave-and-crash-recovery) · [Updates](#updates) · [Interface](#interface)
 - [Requirements](#requirements)
 - [Installation](#installation): [simple (download)](#simple-installation-download) ·
   [advanced (Git)](#advanced-installation-git)
@@ -178,6 +182,20 @@ name and size if they were moved. The keys can be changed in the same dialog or 
   unfinished export queue continues where it stopped.
 - Starting a second window asks first, so two windows do not overwrite each other's settings by accident.
 
+### Updates
+
+*Help → Check for updates…* asks GitHub whether a newer version exists and shows what is new. Nothing is downloaded
+until you press **Download and install**:
+
+- a copy downloaded as a ZIP is compared with the latest [release](https://github.com/USERNAME/anime-clip-studio/releases);
+  the update downloads it, checks the archive and replaces the program files — `.venv`, `vendor` (FFmpeg, libmpv)
+  and your projects, presets and settings stay as they are;
+- a copy installed with Git shows the new commits of its branch and updates with `git pull --ff-only` (refused while
+  tracked files have local changes);
+- afterwards the app restarts through `run.bat`, which installs changed libraries before starting.
+
+The app never checks by itself and sends nothing except the request for the latest version.
+
 ### Interface
 
 | ![Light theme](docs/screenshots/en/main-light.png) | ![Settings](docs/screenshots/en/settings.png) |
@@ -255,8 +273,9 @@ run.bat                                        :: or: uv run python -m acs [vide
 
 ## Updating and uninstalling
 
-- **Update**: `git pull` and `uv sync` (Git), or download the new ZIP, unpack it over the old folder (keep `vendor`)
-  and run `install.bat` again. Projects, presets and settings are kept, they live outside the program folder.
+- **Update**: *Help → Check for updates…* (see [Updates](#updates)). By hand: `git pull` and `uv sync` (Git), or
+  download the new ZIP, unpack it over the old folder (keep `vendor`) and run `install.bat` again. Projects, presets
+  and settings are kept, they live outside the program folder.
 - **Uninstall**: delete the program folder, the desktop shortcut and, if you do not need your settings and autosaves,
   `%APPDATA%\AnimeClipStudio` and `%LOCALAPPDATA%\AnimeClipStudio` (thumbnail / waveform cache). uv and FFmpeg can be
   removed with `winget uninstall astral-sh.uv` / `winget uninstall Gyan.FFmpeg`.
@@ -329,6 +348,11 @@ Every visible string goes through `tr()` with the English text as the key and ne
 
 Data locations: settings, presets, autosaves and logs in `%APPDATA%\AnimeClipStudio`, thumbnail / waveform cache in
 `%LOCALAPPDATA%\AnimeClipStudio\Cache`.
+
+**Publishing a version** (so that *Check for updates* finds it): set `GITHUB_REPO` in
+[`src/acs/__init__.py`](src/acs/__init__.py) to `owner/repository` once, raise `__version__` there and `version` in
+`pyproject.toml`, commit, then create a GitHub release with the tag `v<version>` (e.g. `v0.2.0`). Its description is
+shown to users as "What is new".
 
 On Windows the app does not enable Python's `faulthandler`: LuaJIT inside libmpv raises SEH exceptions as normal
 control flow and faulthandler reacting to them corrupts the interpreter.
