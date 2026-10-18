@@ -9,11 +9,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QFont, QFontMetrics, QKeySequence
-from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
-                               QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSplitter, QStackedWidget,
-                               QTabWidget, QToolButton, QUndoView, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel,
+                               QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider,
+                               QSplitter, QStackedWidget, QTabWidget, QToolButton, QUndoView, QVBoxLayout, QWidget)
 
 from acs import APP_TITLE, __version__
 from acs.core import mpv_markers, recovery, trace
@@ -22,8 +22,8 @@ from acs.core.clipinfo import effective_audio, effective_sub, pick_sub_track, pi
 from acs.core.cropdetect import detect_crop
 from acs.core.document import ProjectDocument
 from acs.core.export import build_export_spec_dict, run_export
-from acs.core.frames import run_frames
-from acs.core.jobs import ACTIVE, Job, JobQueue
+from acs.core.frames import DEFAULT_TEMPLATE, FORMATS, FramesConfig, default_frames_dir, run_frames, run_snapshot
+from acs.core.jobs import ACTIVE, DONE, FAILED, Job, JobQueue
 from acs.core.library import episode_neighbours
 from acs.core.model import SHORTS_ASPECT, CropRect, Project
 from acs.core.presets import CODECS, PresetStore
@@ -34,7 +34,7 @@ from acs.core.project_io import (PROJECT_EXT, ProjectLoadError, find_autosave, l
                                  resolve_video, save_project, write_autosave_data)
 from acs.core.timebase import FrameIndex
 from acs.core.tools import quick_ok
-from acs.core.util import file_fingerprint, fmt_time
+from acs.core.util import file_fingerprint, fmt_time, parse_position
 from acs.i18n import tr
 from acs.core import uiscale
 from acs.ui import icons, theme
@@ -133,8 +133,8 @@ class MainWindow(QMainWindow):
         self.updater = Updater(self)
         self.doc = ProjectDocument(self)
         self.dispatch = MainThreadDispatcher(self)
-        self.queue = JobQueue(settings, {"export": run_export, "frames": run_frames}, self,
-                              post=self.dispatch.post)
+        self.queue = JobQueue(settings, {"export": run_export, "frames": run_frames, "snapshot": run_snapshot},
+                              self, post=self.dispatch.post)
         self._token = 0
         self._load_cancel: threading.Event | None = None
         self._wave_cancel: threading.Event | None = None
@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
         self._scrub_keyframes = False    # currently scrubbing with keyframe seeks
         self._scrub_last = (0.0, 0.0)    # (monotonic time, video time) of the previous scrub step
         self._last_seek: tuple[float, bool] | None = None   # (time, precise) of the newest seek request
+        self._loop_clip: str | None = None   # id of the clip played in a loop (Playback → Loop selected clip)
         self._autosave_pending = False
         # One writer thread: autosaves (with fsync) never block the UI and stay in order.
         self._autosave_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="autosave")
@@ -251,11 +252,13 @@ class MainWindow(QMainWindow):
         mono = "font-family: Consolas, 'Cascadia Mono', monospace; font-size: 16px;"
         self.l_time = QLabel("--:--:--.--- / --:--:--")
         self.l_time.setStyleSheet(mono)
-        self.l_time.setToolTip(tr("Current time / duration"))
+        self.l_time.setToolTip(tr("Current time / duration") + "\n"
+                               + with_key("Double-click: go to a time or frame", "goto"))
         self.l_frame = QLabel("#—")
         self.l_frame.setStyleSheet(mono + f" color: {t.info};")
         self.l_frame.setToolTip(tr("Frame within the current second / frames in that second · "
-                                   "#absolute frame number · K = keyframe"))
+                                   "#absolute frame number · K = keyframe") + "\n"
+                                + with_key("Double-click: go to a time or frame", "goto"))
         bl.addWidget(self.l_time)
         bl.addSpacing(4)
         bl.addWidget(self.l_frame)
@@ -344,9 +347,9 @@ class MainWindow(QMainWindow):
         self.top_split.setCollapsible(0, False)
         self.props_pane = PaneToggle(self.top_split, 1, 320)
 
-        # Player / timeline / clip table. The timeline's thumbnail and waveform rows have a fixed
-        # height and sit right under the transport bar; dragging the handle below the timeline only
-        # grows or shrinks its clip-lane area, so no empty gap can open between video and timeline.
+        # Player / timeline / clip table. The timeline has a fixed height (ruler, thumbnails, waveform
+        # and the clip lanes in use) and sits right under the transport bar; a lane that appears for
+        # overlapping clips takes its height from the video, and gives it back when it goes.
         self.clip_panel.setMinimumHeight(100 if screen_h < SMALL_SCREEN_H else 140)
         # The transport bar spans the player and the side column, so it has the whole width for its
         # single row (and wraps only when even that is not enough).
@@ -434,14 +437,27 @@ class MainWindow(QMainWindow):
                                                                    self.side_pane.size])
         h, w = self.split.height(), self.outer.sizes()[0]
         v = saved.get("v")
-        tl_h = self._timeline_block.minimumSizeHint().height()   # fixed rows + the default lanes
+        tl_h = self.timeline.fixed_height()
         rest = max(0, h - tl_h)
         table = max(self.clip_panel.minimumHeight(), int(rest * 0.22))
+        if v and len(v) == 3:   # the timeline height is never restored: what is left over is the video's
+            v = [max(0, v[0] + v[1] - tl_h), tl_h, v[2]]
         self.split.setSizes(v if v and len(v) == 3 else [max(0, h - tl_h - table), tl_h, table])
         t = saved.get("h")
         self.top_split.setSizes(t if t and len(t) == 2 else [int(w * 0.74), int(w * 0.26)])
         for pane in (self.side_pane, self.clips_pane, self.props_pane):
             pane.sync()
+
+    def _fit_timeline_height(self, _delta: int = 0) -> None:
+        """A clip lane appeared / went: the video area gives / gets that height, the clip table keeps
+        its size."""
+        sizes = self.split.sizes()
+        if len(sizes) != 3 or not any(sizes):
+            return
+        tl_h = self.timeline.fixed_height()
+        sizes[0] = max(0, sizes[0] - (tl_h - sizes[1]))
+        sizes[1] = tl_h
+        self.split.setSizes(sizes)
 
     def _act(self, menu, action_id: str, text: str, fn, extra_keys: tuple[str, ...] = ()) -> QAction:
         a = QAction(tr(text), self)
@@ -473,6 +489,7 @@ class MainWindow(QMainWindow):
         m_file.addSeparator()
         self._act(m_file, "export", "Export clips…", self.export_clips)
         self._act(m_file, "frames", "Extract frames…", lambda: self.extract_frames(None))
+        self._act(m_file, "snapshot", "Save current frame", self.save_frame)
         m_file.addSeparator()
         self._act(m_file, "", "Import marks from mpv…", lambda: self.offer_mpv_import(auto=False))
         self._act(m_file, "", "Clear mpv marks for this video…", self.clear_mpv_marks)
@@ -507,6 +524,9 @@ class MainWindow(QMainWindow):
                                                     lambda m=mod, d=d: self.step(m, d))
         self._act(m_play, "mark_next", "Next marker / clip boundary", lambda: self.jump_mark(1))
         self._act(m_play, "mark_prev", "Previous marker / clip boundary", lambda: self.jump_mark(-1))
+        self._act(m_play, "goto", "Go to time or frame…", self.go_to)
+        self.a_loop = self._act(m_play, "loop", "Loop selected clip", lambda: self.set_loop(self.a_loop.isChecked()))
+        self.a_loop.setCheckable(True)
         self._act(m_play, "shuttle_back", "Shuttle: back 1 second", self.shuttle_back)
         self._act(m_play, "shuttle_stop", "Shuttle: pause", self.shuttle_stop)
         self._act(m_play, "shuttle_fwd", "Shuttle: play / faster", self.shuttle_fwd)
@@ -573,6 +593,7 @@ class MainWindow(QMainWindow):
         self.b_mute.toggled.connect(lambda m: self.player and self.player.set_mute(m))
         self.b_mute.toggled.connect(lambda m: self.b_mute.setIcon(icons.icon("muted" if m else "volume")))
         self.timeline.zoom_to_clip_requested.connect(self._zoom_clip)
+        self.timeline.height_changed.connect(self._fit_timeline_height)
         self.timeline.seek_requested.connect(self.seek)
         self.timeline.scrub_moved.connect(self.scrub)
         self.timeline.scrub_finished.connect(self.scrub_end)
@@ -591,6 +612,11 @@ class MainWindow(QMainWindow):
         self.doc.edge_edit_changed.connect(self._on_edge_edit)
         self.doc.selection_changed.connect(self._update_frame)
         self.doc.clips_changed.connect(self._update_frame)
+        for sig in (self.doc.selection_changed, self.doc.clips_changed, self.doc.index_ready):
+            sig.connect(self._update_loop)
+        self.doc.loaded.connect(lambda: self.set_loop(False, quiet=True))
+        self.l_time.installEventFilter(self)
+        self.l_frame.installEventFilter(self)
         if self.frame_overlay is not None:
             self.frame_overlay.rect_edited.connect(self._on_frame_edited)
         self.queue.job_finished.connect(self._job_finished)
@@ -750,7 +776,7 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
         index = FrameIndex.cfr(info.fps, info.duration, info.video.start_time)
-        remap_frames(project, info.fps, index.nearest_frame)
+        remap_frames(project, info.fps, index.nearest_frame, index.nearest_boundary)
         v.fps = str(info.fps)
         if project.default_audio_track is None:
             project.default_audio_track = pick_track(self.settings.preferred_audio_langs, info.audios)
@@ -1128,6 +1154,109 @@ class MainWindow(QMainWindow):
             self._shortcuts_dlg.deleteLater()
             self._shortcuts_dlg = None
 
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.MouseButtonDblClick and obj in (self.l_time, self.l_frame):
+            self.go_to()
+            return True
+        return super().eventFilter(obj, ev)
+
+    def go_to(self) -> None:
+        """Ctrl+G / double-click on the time display: jump to a typed time or frame number."""
+        if not self.doc.has_video:
+            return
+        text = fmt_time(self.doc.time_of(self._cur_frame()))
+        while True:
+            text, ok = QInputDialog.getText(
+                self, tr("Go to time or frame"),
+                tr("Time (1:23, 01:02:03.500, 83.5) or frame number (#1234, 1234f).\n"
+                   "A leading + or − moves from the current position (+10f, -2)."),
+                QLineEdit.EchoMode.Normal, text)
+            if not ok:
+                return
+            pos = parse_position(text)
+            if pos is not None:
+                break
+            self.statusBar().showMessage(tr("Not a time or a frame number: {text}").format(text=text), 5000)
+        kind, value, relative = pos
+        if kind == "frame":
+            self.seek_frame(int(value) + (self._cur_frame() if relative else 0))
+        else:
+            self.seek(max(0.0, value + (self.doc.time_of(self._cur_frame()) if relative else 0.0)))
+
+    # ---- loop playback of a clip ----
+    def _loop_target(self):
+        """The selected finished clip, else the finished clip under the playhead."""
+        c = self.doc.selected_clip()
+        if c is None or not c.is_complete:
+            c = self._frame_clip()
+        return c if c is not None and c.is_complete else None
+
+    def set_loop(self, on: bool, quiet: bool = False) -> None:
+        """P: play the clip again and again (mpv A-B loop) until P is pressed again."""
+        c = self._loop_target() if on and self.doc.has_video and self.player is not None else None
+        if on and c is None:
+            self.statusBar().showMessage(tr("Select a finished clip to play it in a loop."), 4000)
+        self._loop_clip = c.id if c is not None else None
+        self.a_loop.setChecked(c is not None)
+        self._apply_loop()
+        if c is not None:
+            self.seek(c.in_time)
+            self.player.set_paused(False)
+            self.statusBar().showMessage(tr("Playing “{name}” in a loop · {key} — stop").format(
+                name=c.name, key=key_for("loop")), 5000)
+        elif not on and not quiet:
+            self.statusBar().showMessage(tr("Loop playback is off."), 3000)
+
+    def _apply_loop(self) -> None:
+        if self.player is None:
+            return
+        c = self.doc.project.clip_by_id(self._loop_clip) if self._loop_clip else None
+        if c is None:
+            self.player.set_ab_loop(None)
+        else:   # Out is exclusive: B is the start of the frame after the clip (mpv also loops at the end)
+            self.player.set_ab_loop(c.in_time, c.out_time)
+
+    def _update_loop(self) -> None:
+        """The loop follows the selected clip and its edges; it stops when its clip is gone."""
+        if self._loop_clip is None:
+            return
+        sel = self.doc.selected_clip()
+        if sel is not None and sel.is_complete and sel.id != self._loop_clip:
+            self._loop_clip = sel.id
+        c = self.doc.project.clip_by_id(self._loop_clip)
+        if c is None or not c.is_complete:
+            self.set_loop(False)
+            return
+        self._apply_loop()
+
+    # ---- saving the current frame ----
+    def save_frame(self) -> None:
+        """S: save the frame under the playhead as an image (format of the last Extract frames run,
+        subtitles as shown in the player), in the background."""
+        if not self.doc.has_video:
+            return
+        info, src = self.doc.info, self.doc.project.video.path
+        f = self._cur_frame()
+        t = self.doc.time_of(f)
+        last = self.settings.frames_last or {}
+        sid = self.c_sid.current_data()
+        sub = next((x for x in info.subs if x.rel == sid), None) if sid is not None else None
+        fmt = last.get("fmt", "png")
+        cfg = FramesConfig(src=src, ranges=[], out_dir=default_frames_dir(self.settings.output_dir, src),
+                           fmt=fmt if fmt in FORMATS else "png", quality=int(last.get("quality", 92)),
+                           webp_lossless=bool(last.get("webp_lossless", False)),
+                           sub_rel=sub.rel if sub is not None and not sub.is_bitmap else None,
+                           template=self.settings.frames_template or DEFAULT_TEMPLATE, hwaccel=False,
+                           fps=float(info.fps))
+        job = Job("snapshot", f"{Path(src).stem} · " + tr("Frame") + f" #{f}",
+                  {"config": cfg.to_dict(), "time": t, "frame": f})
+        trace.log("frames", f"snapshot frame {f} t={t:.3f} fmt={cfg.fmt} subs={cfg.sub_rel}")
+        self.queue.enqueue([job])
+        text = tr("Saving frame #{n}…").format(n=f)
+        if sub is not None and sub.is_bitmap:
+            text += " " + tr("(bitmap subtitles are not drawn)")
+        self.statusBar().showMessage(text, 4000)
+
     def jump_seconds(self, dt: float) -> None:
         self.seek(self._pos + dt)
 
@@ -1493,7 +1622,9 @@ class MainWindow(QMainWindow):
         if not any(c.is_complete for c in self.doc.project.clips):
             QMessageBox.information(self, APP_TITLE, tr("There are no finished clips yet. Mark a clip with I and O."))
             return
-        dlg = ExportDialog(self.doc, self.presets, self.settings, self)
+        busy = [j.spec.get("output", "") for j in self.queue.jobs
+                if j.kind == "export" and j.status in ACTIVE and j.spec.get("output")]
+        dlg = ExportDialog(self.doc, self.presets, self.settings, self, busy=busy)
         if not dlg.exec():
             return
         items = dlg.items()
@@ -1554,6 +1685,13 @@ class MainWindow(QMainWindow):
 
     def _job_finished(self, job_id: str) -> None:
         job = self.queue.get(job_id)
+        if job is not None and job.kind == "snapshot":
+            if job.status == DONE:
+                self.statusBar().showMessage(tr("Frame saved: {path}").format(path=job.output), 8000)
+            elif job.status == FAILED:
+                error = job.message.splitlines()[-1] if job.message else ""
+                self.statusBar().showMessage(tr("Could not save the frame: {error}").format(error=error), 10000)
+            return
         if job is not None and not self.queue.has_active():
             self.statusBar().showMessage(tr("All jobs finished."), 6000)
 
@@ -1751,8 +1889,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             ev.ignore()
             return  # nothing cancelled yet: the jobs keep running
-        if jobs_running:
-            self.queue.cancel_all()
+        self.queue.shutdown()
         self._autosave(wait=True)
         self._autosave_writer.shutdown(wait=True)
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
@@ -1765,6 +1902,5 @@ class MainWindow(QMainWindow):
         self.library.shutdown()
         if self.player is not None:
             self.player.shutdown()
-        recovery.save_queue_state([j.to_dict() for j in self.queue.jobs if j.status in ACTIVE])
         recovery.release_lock()
         super().closeEvent(ev)

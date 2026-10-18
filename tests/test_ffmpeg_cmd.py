@@ -1,6 +1,6 @@
 from fractions import Fraction
 
-from acs.core.ffmpeg_cmd import (ExportSpec, SubsSource, auto_height, build_encode_passes, clamp_height,
+from acs.core.ffmpeg_cmd import (ExportSpec, SubsSource, audio_args, auto_height, build_encode_passes, clamp_height,
                                  requested_height, size_video_kbps)
 from acs.core.model import CropRect
 from acs.core.presets import builtin_presets
@@ -92,3 +92,21 @@ def test_size_bitrate_and_auto_height():
     # start height respected (never above)
     h, _ = auto_height(1920, 1080, 23.976, 8000, 0.06, 480, 720)
     assert h == 720
+
+
+def test_copied_audio_drops_packets_before_the_clip_and_keeps_language():
+    info = media()
+    args = audio_args(spec(preset("orig_smartcut")), info, "mkv")   # smart cut mux and its fallback
+    i = args.index("-c:a")
+    assert args[i + 1] == "copy" and args[i + 2:i + 4] == ["-copypriorss", "0"]
+    assert args[args.index("-metadata:s:a:0") + 1] == "language=jpn"
+    args = build_encode_passes(spec(preset("x264_crf18")), info)[-1]
+    assert "-copypriorss" not in args       # re-encoded audio is trimmed exactly by the input seek
+
+
+def test_burned_subtitles_ignore_the_file_start_time():
+    info = media()
+    info.start_time = 2.0                   # the extracted .ass is on the relative timeline
+    subs = SubsSource("work", "track0.ass", "fonts")
+    args = build_encode_passes(spec(preset("x264_crf18"), subs=subs), info)[-1]
+    assert args[args.index("-vf") + 1].startswith("setpts=PTS+10.010000/TB,subtitles=")

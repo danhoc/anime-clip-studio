@@ -5,10 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-                               QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QRadioButton, QSpinBox, QVBoxLayout)
+                               QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                               QPushButton, QRadioButton, QSpinBox, QVBoxLayout)
 
-from acs.core.frames import FramesConfig, estimate_count
+from acs.core.frames import DEFAULT_TEMPLATE, FramesConfig, default_frames_dir, estimate_count, template_problem
 from acs.core.probe import MediaInfo
 from acs.core.util import fmt_time
 from acs.i18n import tr
@@ -119,6 +119,7 @@ class FramesDialog(QDialog):
         self.quality.setValue(int(last.get("quality", 92)))
         self.quality.setToolTip(tr("JPEG / WebP quality"))
         self.lossless = QCheckBox(tr("Lossless WebP"))
+        self.lossless.setChecked(bool(last.get("webp_lossless", False)))
         self.subs = QCheckBox(tr("Draw subtitles"))
         self.sub_track = QComboBox()
         for s in info.subs:
@@ -129,7 +130,7 @@ class FramesDialog(QDialog):
         srow.addWidget(self.subs)
         srow.addWidget(self.sub_track, 1)
         orow = QHBoxLayout()
-        self.out = QLineEdit(last.get("out_dir") or str(Path(settings.output_dir) / "frames" / Path(src).stem))
+        self.out = QLineEdit(last.get("out_dir") or default_frames_dir(settings.output_dir, src))
         b = QPushButton("…")
         b.setFixedWidth(28)
         b.clicked.connect(self._browse)
@@ -207,12 +208,26 @@ class FramesDialog(QDialog):
             sub_rel=self.sub_track.currentData() if self.subs.isChecked() and self.sub_track.count() else None,
             dedup=self.dedup.currentData(), strict_thresh=self.strict.value(),
             similar_thresh=self.similar.value(), similar_window=self.window.value(),
-            template=self.template.text() or "{video}_{time}_{frame}", hwaccel=self.settings.hwdec,
+            template=self.template.text() or DEFAULT_TEMPLATE, hwaccel=self.settings.hwdec,
             fps=float(self.info.fps),
         )
 
     def remember(self) -> dict:
         c = self.config()
         return {"interval": c.interval, "scene_threshold": c.scene_threshold, "mode": c.mode, "dedup": c.dedup,
-                "fmt": c.fmt, "quality": c.quality, "strict_thresh": c.strict_thresh,
+                "fmt": c.fmt, "quality": c.quality, "webp_lossless": c.webp_lossless, "strict_thresh": c.strict_thresh,
                 "similar_thresh": c.similar_thresh, "similar_window": c.similar_window}
+
+    def accept(self) -> None:
+        problem = template_problem(self.template.text() or DEFAULT_TEMPLATE)
+        if problem == "invalid":
+            QMessageBox.warning(self, self.windowTitle(),
+                                tr("The file name template has an unknown variable or a stray brace. "
+                                   "Variables: {video} {time} {frame}"))
+            return
+        if problem == "not_unique":
+            QMessageBox.warning(self, self.windowTitle(),
+                                tr("The file name template needs {time} or {frame}, otherwise every frame "
+                                   "gets the same name."))
+            return
+        super().accept()

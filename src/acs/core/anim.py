@@ -50,8 +50,8 @@ def _dither_opt(d: str) -> str:
 
 def anim_args(kind: str, ffmpeg: str, src: str, start: float, duration: float, params: AnimParams,
               output: str, crop: CropRect | None = None, subs: SubsSource | None = None,
-              start_time: float = 0.0, progress: bool = True) -> list[str]:
-    pre = subs_filters(subs, start, start_time) + geometry_filters(crop, None)
+              progress: bool = True) -> list[str]:
+    pre = subs_filters(subs, start) + geometry_filters(crop, None)
     chain = pre + [f"fps={params.fps}"]
     if params.height:
         chain.append(f"scale=-2:{params.height}:flags=lanczos")

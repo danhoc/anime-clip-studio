@@ -5,8 +5,8 @@ from __future__ import annotations
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QUndoStack
 
-from acs.core.commands import (AddClipCmd, AddMarkerCmd, MoveMarkerCmd, RemoveItemsCmd, SetClipFieldsCmd,
-                               SetMarkerFieldsCmd, SetProjectFieldsCmd, SetViewCmd)
+from acs.core.commands import (VIEW_MERGE_ID, AddClipCmd, AddMarkerCmd, MoveMarkerCmd, RemoveItemsCmd,
+                               SetClipFieldsCmd, SetMarkerFieldsCmd, SetProjectFieldsCmd, SetViewCmd)
 from acs.core.model import Clip, Marker, Project
 from acs.core.probe import MediaInfo
 from acs.core.timebase import FrameIndex
@@ -32,14 +32,29 @@ class ProjectDocument(QObject):
         self.index: FrameIndex | None = None
         self.project_path: str | None = None
         self.undo = QUndoStack(self)
-        self.undo.cleanChanged.connect(self._on_clean_changed)
+        self._dirty = False
+        self.undo.cleanChanged.connect(self._update_dirty)
+        self.undo.indexChanged.connect(self._update_dirty)
         self.selected_clips: list[str] = []
         self.selected_markers: list[str] = []
         # (clip id, "in" | "out"): that edge follows the playhead until I / O sets it (not undoable)
         self.edge_edit: tuple[str, str] | None = None
 
-    def _on_clean_changed(self, clean: bool) -> None:
-        self.dirty_changed.emit(not clean)
+    def _compute_dirty(self) -> bool:
+        """Unsaved edits: a command other than a zoom / scroll step lies between the saved state and
+        now (view steps stay undoable but do not make the project "changed")."""
+        u = self.undo
+        clean = u.cleanIndex()
+        if clean < 0:
+            return True
+        lo, hi = sorted((clean, u.index()))
+        return any(u.command(i).id() != VIEW_MERGE_ID for i in range(lo, hi))
+
+    def _update_dirty(self, *_args) -> None:
+        dirty = self._compute_dirty()
+        if dirty != self._dirty:
+            self._dirty = dirty
+            self.dirty_changed.emit(dirty)
 
     # ---- state ----------------------------------------------------------------------------
     @property
@@ -48,7 +63,7 @@ class ProjectDocument(QObject):
 
     @property
     def dirty(self) -> bool:
-        return not self.undo.isClean()
+        return self._compute_dirty()
 
     def load(self, project: Project, info: MediaInfo | None, index: FrameIndex | None,
              project_path: str | None) -> None:
@@ -77,7 +92,7 @@ class ProjectDocument(QObject):
             c.in_frame = index.nearest_frame(c.in_time)
             c.in_time = index.time_of(c.in_frame)
             if c.out_time is not None:
-                c.out_frame = max(c.in_frame + 1, index.nearest_frame(c.out_time))
+                c.out_frame = max(c.in_frame + 1, index.nearest_boundary(c.out_time))
                 c.out_time = index.time_of(c.out_frame)
         self.index_ready.emit()
         self.markers_changed.emit()
@@ -228,7 +243,8 @@ class ProjectDocument(QObject):
         return c
 
     def set_in(self, frame: int) -> Clip | None:
-        """I key: move In of the open/selected clip, or start a new open clip.
+        """I key: move In of the open clip, or start a new open clip. A selected finished clip is left
+        alone (its edges change by dragging or with start_edge_edit).
 
         While the In edge of a clip is being changed, sets that In instead (None when it would not be
         before the clip's Out; the edit then stays active)."""
@@ -245,14 +261,10 @@ class ProjectDocument(QObject):
         if open_c is not None:
             self.set_clip_fields(open_c.id, {"in_frame": frame}, tr("Set In"))
             return open_c
-        sel = self.selected_clip()
-        if sel is not None and sel.out_frame is not None and frame < sel.out_frame:
-            self.set_clip_fields(sel.id, {"in_frame": frame}, tr("Set In"))
-            return sel
         return self.add_clip(frame, None)
 
     def set_out(self, frame: int) -> Clip | None:
-        """O key: close the open clip (Out is inclusive of the current frame)."""
+        """O key: close the open clip (Out is inclusive of the current frame); None without one."""
         out = min(self.clamp_frame(frame) + 1, self.frame_count)
         edited = self._edge_edit_clip("out")
         if edited is not None:
@@ -262,7 +274,7 @@ class ProjectDocument(QObject):
             self.set_clip_fields(edited.id, {"out_frame": out}, tr("Set Out"))
             self.select_clips([edited.id])
             return edited
-        target = self.open_clip() or self.selected_clip()
+        target = self.open_clip()
         if target is None:
             return None
         if out <= target.in_frame:

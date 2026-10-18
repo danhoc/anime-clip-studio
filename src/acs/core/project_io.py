@@ -109,8 +109,11 @@ def resolve_video(project: Project, project_path: str | Path | None) -> tuple[st
     return None, "missing"
 
 
-def remap_frames(project: Project, new_fps: Fraction, time_to_frame) -> bool:
-    """If the stored fps differs from the video's, recompute frame numbers from stored times."""
+def remap_frames(project: Project, new_fps: Fraction, time_to_frame, time_to_end=None) -> bool:
+    """If the stored fps differs from the video's, recompute frame numbers from stored times.
+
+    `time_to_end` maps the exclusive clip ends (FrameIndex.nearest_boundary), default time_to_frame."""
+    time_to_end = time_to_end or time_to_frame
     try:
         old = Fraction(project.video.fps) if project.video.fps else None
     except (ValueError, ZeroDivisionError):
@@ -122,6 +125,6 @@ def remap_frames(project: Project, new_fps: Fraction, time_to_frame) -> bool:
     for c in project.clips:
         c.in_frame = time_to_frame(c.in_time)
         if c.out_time is not None:
-            c.out_frame = max(c.in_frame + 1, time_to_frame(c.out_time))
+            c.out_frame = max(c.in_frame + 1, time_to_end(c.out_time))
     project.video.fps = str(new_fps)
     return True

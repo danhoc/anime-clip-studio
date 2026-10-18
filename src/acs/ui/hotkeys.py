@@ -16,6 +16,8 @@ HOTKEYS: list[tuple[str, str, str, str]] = [
     ("step_ctrl_prev", "Ctrl+Left", "Back (Ctrl+arrow step)", "Playback"),
     ("mark_next", "Down", "Next marker / clip boundary", "Playback"),
     ("mark_prev", "Up", "Previous marker / clip boundary", "Playback"),
+    ("goto", "Ctrl+G", "Go to a time or frame number", "Playback"),
+    ("loop", "P", "Play the selected clip in a loop (again to stop)", "Playback"),
     ("shuttle_back", "J", "Shuttle: back 1 second", "Playback"),
     ("shuttle_stop", "K", "Shuttle: pause", "Playback"),
     ("shuttle_fwd", "L", "Shuttle: play / faster", "Playback"),
@@ -40,6 +42,7 @@ HOTKEYS: list[tuple[str, str, str, str]] = [
     ("save_as", "Ctrl+Shift+S", "Save project as", "File"),
     ("export", "Ctrl+E", "Export clips", "File"),
     ("frames", "Ctrl+Shift+E", "Extract frames", "File"),
+    ("snapshot", "S", "Save the current frame as an image", "File"),
     ("help", "F1", "Keyboard shortcuts", "Help"),
 ]
 
@@ -52,6 +55,7 @@ MOUSE_HINTS: list[tuple[str, str]] = [
     ("Right click clip edge", "Change that edge with the playhead, then press I / O"),
     ("Ctrl + click clip", "Add clip to selection"),
     ("Double-click clip", "Jump to clip start"),
+    ("Double-click the time display", "Go to a time or frame number"),
     ("Drag the frame over the video", "Move the Shorts frame (Tools → Shorts Mode) or the manual crop"),
     ("Drag a frame corner / edge, or wheel", "Resize it (a chosen aspect ratio is kept)"),
     ("Double-click the frame", "Reset it to the largest size"),

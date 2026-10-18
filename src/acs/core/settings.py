@@ -130,7 +130,6 @@ class AppSettings:
     show_tour: bool = True
     name_template: str = "{video}_{clip}_{in}-{out}"
     frames_template: str = "{video}_{time}_{frame}"
-    default_preset_id: str = "x264_crf18"
     step_arrow: str = DEFAULT_STEPS["arrow"]     # ← / →
     step_shift: str = DEFAULT_STEPS["shift"]     # Shift + ← / →
     step_ctrl: str = DEFAULT_STEPS["ctrl"]       # Ctrl + ← / →

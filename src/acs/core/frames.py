@@ -100,11 +100,12 @@ def select_filter(cfg: FramesConfig, t0_abs: float) -> str:
 
 def single_pass_args(ffmpeg: str, cfg: FramesConfig, info: MediaInfo, t0: float, t1: float,
                      tmp_pattern: str, subs: SubsSource | None, with_small: bool) -> list[str]:
-    st = info.start_time
-    pre = [f"setpts=PTS+{t0 + st:.6f}/TB"]
+    # pts back on the app's relative timeline: that is where the extracted subtitles are timed and
+    # what showinfo reports for the file names
+    pre = [f"setpts=PTS+{t0:.6f}/TB"]
     if subs is not None:
         pre.append(f"subtitles=f={subs.ass_name}:fontsdir={subs.fonts_name}")
-    chain = pre + [select_filter(cfg, t0 + st), "showinfo"]
+    chain = pre + [select_filter(cfg, t0), "showinfo"]
     if with_small:
         graph = (f"[0:v:0]{','.join(chain)},split=2[f][s];[f]{color_filter(info, cfg.fmt)}[fo];"
                  f"[s]scale={SMALL_W}:{SMALL_H}:flags=area,format=gray[so]")
@@ -125,7 +126,7 @@ def seek_frame_args(ffmpeg: str, cfg: FramesConfig, info: MediaInfo, t: float, o
                     subs: SubsSource | None) -> list[str]:
     chain = []
     if subs is not None:
-        chain += [f"setpts=PTS+{t + info.start_time:.6f}/TB",
+        chain += [f"setpts=PTS+{t:.6f}/TB",
                   f"subtitles=f={subs.ass_name}:fontsdir={subs.fonts_name}"]
     chain.append(color_filter(info, cfg.fmt))
     return ([ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-ss", f"{max(0.0, t - SEEK_EPS):.6f}",
@@ -172,9 +173,48 @@ class Deduper:
             del self.kept[0]
 
 
+DEFAULT_TEMPLATE = "{video}_{time}_{frame}"
+
+
+def _render(template: str, video_name: str, t: float, frame: int) -> str:
+    return template.format(video=video_name, time=fmt_time_filename(t), frame=f"{frame:06d}")
+
+
+def template_problem(template: str) -> str | None:
+    """None when the file-name template is usable; "invalid" (unknown variable, stray brace) or
+    "not_unique" (neither {time} nor {frame}: every frame would get the same name)."""
+    try:
+        _render(template, "v", 0.0, 0)
+    except (KeyError, IndexError, ValueError):
+        return "invalid"
+    if _render(template, "v", 0.0, 0) == _render(template, "v", 1.0, 1):
+        return "not_unique"
+    return None
+
+
 def output_name(cfg: FramesConfig, video_name: str, t: float, frame: int) -> str:
-    name = cfg.template.format(video=video_name, time=fmt_time_filename(t), frame=f"{frame:06d}")
+    try:
+        name = _render(cfg.template, video_name, t, frame)
+    except (KeyError, IndexError, ValueError):   # e.g. a template saved by an older version
+        name = _render(DEFAULT_TEMPLATE, video_name, t, frame)
     return safe_filename(name) + "." + FORMATS[cfg.fmt]
+
+
+def default_frames_dir(output_dir: str, src: str) -> str:
+    """Where frames of a video go unless the user picks another folder."""
+    return str(Path(output_dir) / "frames" / Path(src).stem)
+
+
+def merge_ranges(ranges) -> list[tuple[float, float]]:
+    """Ranges in time order with overlaps joined: resuming relies on the order (done_until), and
+    overlapping clips must not extract the same frames twice."""
+    out: list[tuple[float, float]] = []
+    for a, b in sorted((float(a), float(b)) for a, b in ranges if b > a):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
 
 
 def trim_ranges(ranges: list[tuple[float, float]], done_until: float | None) -> list[tuple[float, float]]:
@@ -192,6 +232,7 @@ def trim_ranges(ranges: list[tuple[float, float]], done_until: float | None) -> 
 def run_frames(ctx: JobContext, job) -> None:
     st = ctx.settings
     cfg = FramesConfig.from_dict(job.spec["config"])
+    cfg.ranges = merge_ranges(cfg.ranges)
     src = cfg.src
     if not Path(src).is_file():
         raise JobError(f"source not found: {src}")
@@ -266,7 +307,7 @@ def _single_pass(ctx, job, cfg, info, t0, t1, subs, work: Path, out_dir: Path, v
             r = parse_showinfo(line)
             if r is not None:
                 with cond:
-                    times[r[0]] = r[1] - info.start_time
+                    times[r[0]] = r[1]
                     cond.notify_all()
             elif "error" in line.lower():
                 err_tail.append(line.strip())
@@ -384,10 +425,52 @@ def _run_parallel_seeks(ctx, job, cfg, info, ranges, subs, out_dir: Path, video_
                 ctx.save_state()
 
     with ThreadPoolExecutor(max_workers=4) as pool:
-        for fut in [pool.submit(one, t) for t in targets]:
-            fut.result()
+        futures = [pool.submit(one, t) for t in targets]
+        try:
+            for fut in futures:
+                fut.result()
+        except BaseException:
+            pool.shutdown(cancel_futures=True)   # the first failure ends the job: skip the rest
+            raise
     ctx.check()
     ctx.set_progress(1.0, f"saved {job.state['kept']}", force=True)
+
+
+def run_snapshot(ctx: JobContext, job) -> None:
+    """Save one frame (the player's current one). spec: config + its exact time and frame number."""
+    st = ctx.settings
+    cfg = FramesConfig.from_dict(job.spec["config"])
+    t, frame = float(job.spec["time"]), int(job.spec["frame"])
+    if not Path(cfg.src).is_file():
+        raise JobError(f"source not found: {cfg.src}")
+    info = probe(cfg.src, st.ffprobe)
+    if info.video is None:
+        raise JobError("no video stream")
+    subs = None
+    if cfg.sub_rel is not None:
+        try:
+            subs = prepare_subs(cfg.src, info, cfg.sub_rel, st.ffmpeg)
+        except SubsError as e:
+            raise JobError(f"subtitles: {e}") from e
+    out_dir = Path(cfg.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / output_name(cfg, Path(cfg.src).stem, t, frame)
+    tmp = out_dir / (dest.name + ".part." + FORMATS[cfg.fmt])
+    ctx.set_progress(0.1, "saving frame", force=True)
+    try:
+        r = ctx.capture(seek_frame_args(st.ffmpeg, cfg, info, t, str(tmp), subs),
+                        cwd=subs.workdir if subs else None, timeout=120)
+        if r.returncode != 0 or not tmp.exists():
+            raise JobError(clean_stderr(r.stderr)[-400:] or "frame extraction failed")
+        os.replace(tmp, dest)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    job.output = str(dest)
+    ctx.set_progress(1.0, f"saved {dest.name}", force=True)
 
 
 def estimate_count(cfg: FramesConfig) -> int:

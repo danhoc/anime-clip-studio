@@ -89,3 +89,22 @@ def test_library_scan_and_neighbours(tmp_path):
     prev, nxt = episode_neighbours(str(show / "Ep 2.mkv"), ["mkv"])
     assert os.path.basename(prev) == "Ep 1.mkv" and os.path.basename(nxt) == "Ep 10.mkv"
     assert sorted(["b10", "b2"], key=natural_key) == ["b2", "b10"]
+
+
+def test_frame_name_template_checks_and_fallback():
+    from acs.core.frames import template_problem
+    assert template_problem("{video}_{time}_{frame}") is None
+    assert template_problem("{frame}") is None
+    assert template_problem("{video}") == "not_unique"
+    assert template_problem("{clip}_{time}") == "invalid"
+    assert template_problem("{video_{time}") == "invalid"
+    cfg = FramesConfig(src="a.mkv", ranges=[], out_dir="o", template="{clip}")
+    assert output_name(cfg, "ep01", 1.5, 36) == "ep01_00-00-01-500_000036.png"   # unusable -> default
+
+
+def test_frame_ranges_are_sorted_and_merged_for_resuming():
+    from acs.core.frames import merge_ranges
+    # clips listed in creation order, two of them overlapping
+    assert merge_ranges([(600, 610), (60, 70), (65, 80), (80, 90), (5, 5)]) == [(60.0, 90.0), (600.0, 610.0)]
+    # resuming after a crash inside the early range no longer drops the late one and vice versa
+    assert trim_ranges(merge_ranges([(600, 610), (60, 70)]), 65.0) == [(65.001, 70.0), (600.0, 610.0)]

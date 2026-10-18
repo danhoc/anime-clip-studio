@@ -287,8 +287,7 @@ def _run_anim(ctx: JobContext, spec: ExportSpec, info: MediaInfo, preset: Preset
     cwd = _cwd(spec, work)
 
     def encode(p: anim.AnimParams, start: float, dur: float, out: str, span=None, message=None) -> int:
-        args = anim.anim_args(kind, st.ffmpeg, spec.src, start, dur, p, out, spec.crop, spec.subs,
-                              info.start_time)
+        args = anim.anim_args(kind, st.ffmpeg, spec.src, start, dur, p, out, spec.crop, spec.subs)
         if span is None:
             r = ctx.capture(args, cwd=cwd)
             if r.returncode != 0:

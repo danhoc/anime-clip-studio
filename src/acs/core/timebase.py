@@ -108,6 +108,14 @@ class FrameIndex:
             return self.frame_count - 1
         return i if (self.times[i] - t) < (t - self.times[i - 1]) else i - 1
 
+    def nearest_boundary(self, t: float) -> int:
+        """Nearest frame *boundary* for an exclusive end (clip Out): like nearest_frame, but the
+        end of the video counts too, so a clip ending with the last frame keeps it."""
+        if self.frame_count and t >= float(self.times[-1]):
+            last = float(self.times[-1])
+            return self.frame_count if (t - last) >= (self.end_time - t) else self.frame_count - 1
+        return self.nearest_frame(t)
+
     def frame_in_second(self, f: int) -> tuple[int, int]:
         """(1-based position of frame f within its whole second, number of frames in that second).
 

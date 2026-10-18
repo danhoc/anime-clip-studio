@@ -73,7 +73,7 @@ project: no ads, no accounts, no telemetry, and nothing is downloaded without yo
 - **Ctrl + wheel** zooms around the cursor down to single frames, the wheel scrolls; **Z** zooms to the selected clip,
   **Ctrl+0** shows the whole episode. Drag the playhead to an edge of a zoomed timeline to scroll it.
 - **I** starts a clip, **O** ends it (the current frame is included), **M** adds a coloured marker. Any number of
-  clips; overlapping clips go to extra lanes.
+  clips; overlapping clips go to extra lanes, which appear only while clips overlap.
 - Drag a clip edge to move it: it snaps to frames, markers and keyframes (hold **Alt** to turn snapping off). Or
   right-click an edge, move the playhead and press **I** / **O** to set it again.
 - Every change can be undone: **Ctrl+Z / Ctrl+Y**, the full list is in the *History* tab.
@@ -296,7 +296,8 @@ run.bat                                        :: or: uv run python -m acs [vide
 | Ctrl+O / Ctrl+Shift+O | open video / project | Ctrl+L | show / hide library |
 | Ctrl+S / Ctrl+Shift+S | save project / save as | Ctrl+Shift+Q | show / hide export queue |
 | Ctrl+E | export clips | F1 | all keyboard shortcuts |
-| Ctrl+Shift+E | extract frames | | |
+| Ctrl+Shift+E | extract frames | S | save the current frame as an image |
+| Ctrl+G | go to a time or frame number | P | play the selected clip in a loop |
 
 | Mouse | Action |
 |---|---|
@@ -307,6 +308,7 @@ run.bat                                        :: or: uv run python -m acs [vide
 | Right-click clip edge | change that edge with the playhead, then press I / O |
 | Ctrl + click clip | add clip to selection |
 | Double-click clip | jump to clip start |
+| Double-click the time display | go to a time or frame number |
 | Drag the frame over the video | move the Shorts frame or the manual crop |
 | Drag a frame corner / edge, or wheel | resize it (a chosen aspect ratio is kept) |
 | Double-click the frame | reset it to the largest size |

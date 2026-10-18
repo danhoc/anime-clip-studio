@@ -106,6 +106,36 @@ def fmt_time(t: float | None, ms: bool = True) -> str:
     return "-" + out if neg else out
 
 
+_FRAME_POS_RE = re.compile(r"#(\d+)|(\d+)f")
+_TIME_POS_RE = re.compile(r"(?:(\d+):)?(?:(\d+):)?(\d+(?:\.\d*)?|\.\d+)s?")
+
+
+def parse_position(text: str) -> tuple[str, float, bool] | None:
+    """A typed position: ('time', seconds, relative) or ('frame', number, relative); None if invalid.
+
+    Times: '83.5', '83,5', '83s', '1:23', '01:02:03.500'; frames: '#1234', '1234f'.
+    A leading '+' / '-' (or '−') means relative to the current position ('+10f', '-2')."""
+    s = text.strip().replace(" ", "").replace(",", ".").replace("−", "-").lower()
+    relative = s[:1] in ("+", "-")
+    sign = -1 if s[:1] == "-" else 1
+    if relative:
+        s = s[1:]
+    m = _FRAME_POS_RE.fullmatch(s)
+    if m:
+        return "frame", float(sign * int(m.group(1) or m.group(2))), relative
+    m = _TIME_POS_RE.fullmatch(s)
+    if not m:
+        return None
+    a, b, sec = m.groups()
+    h, mnt = (a, b) if b is not None else (None, a)
+    if mnt is not None and h is not None and int(mnt) >= 60:
+        return None
+    if mnt is not None and float(sec) >= 60:
+        return None
+    t = int(h or 0) * 3600 + int(mnt or 0) * 60 + float(sec)
+    return "time", sign * t, relative
+
+
 def fmt_time_filename(t: float) -> str:
     return fmt_time(t).replace(":", "-").replace(".", "-")
 

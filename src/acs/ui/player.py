@@ -161,6 +161,7 @@ class MpvPlayer(QWidget):
         self._pause: bool | None = None
         self._duration: float | None = None
         self._crop: str | None = None
+        self._ab_loop = ("no", "no")
         self._seek_want: tuple[float, bool] | None = None   # newest request not sent yet
         self._seek_sent: float | None = None                # monotonic time of the seek in flight
         self._seek_precise = True
@@ -399,6 +400,18 @@ class MpvPlayer(QWidget):
             self.mpv["video-crop"] = mpv_rect or ""
         except Exception as e:  # noqa: BLE001 - older libmpv without video-crop
             log.info("video-crop unsupported: %s", e)
+
+    def set_ab_loop(self, a: float | None, b: float | None = None) -> None:
+        """Repeat a..b while playing (mpv's A-B loop, times like seek()); a = None turns it off."""
+        want = ("no", "no") if a is None or b is None else (f"{a:.6f}", f"{b:.6f}")
+        if want == self._ab_loop:
+            return   # called on every clip / selection change; skip when nothing changes
+        self._ab_loop = want
+        trace.log("player", f"ab-loop {want[0]} .. {want[1]}")
+        try:
+            self.mpv["ab-loop-a"], self.mpv["ab-loop-b"] = want
+        except Exception as e:  # noqa: BLE001
+            trace.log("player", f"ab-loop failed: {e}")
 
     def set_osd_overlay(self, ass: str | None, res_x: int = 0, res_y: int = 0) -> None:
         """ASS events drawn by mpv over the picture (coordinates in a res_x × res_y space); None

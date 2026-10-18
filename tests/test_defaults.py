@@ -55,7 +55,7 @@ def test_live_lock_detects_other_running_instance():
 
 def test_new_projects_default_to_h264_crf18():
     assert Project().default_preset_id == "x264_crf18"
-    assert AppSettings().default_preset_id == "x264_crf18"
+    assert Project.from_dict({"video": {}}).default_preset_id == "x264_crf18"   # old files without the key
 
 
 def test_arrow_steps_default_and_round_trip():

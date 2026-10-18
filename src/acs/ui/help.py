@@ -82,6 +82,9 @@ class QuickHelpDialog(QDialog):
             ("↑ / ↓", tr("Previous / next marker or clip boundary")),
             (f"{key_for('set_in')} / {key_for('set_out')}", tr("Clip start / end (the current frame is included)")),
             (key_for("marker"), tr("Add marker")),
+            (key_for("goto"), tr("Go to a time or frame number")),
+            (key_for("loop"), tr("Play the selected clip in a loop (again to stop)")),
+            (key_for("snapshot"), tr("Save the current frame as an image")),
             (key_for("delete"), tr("Delete selected clips / markers")),
             (f"{key_for('undo')} / {key_for('redo')}", tr("Undo / redo")),
             (tr("Ctrl + wheel"), tr("Zoom timeline around the cursor")),
@@ -109,6 +112,11 @@ class QuickHelpDialog(QDialog):
             tr("Manual crop: pick an aspect ratio under “{crop}” and adjust the frame over the video the same way "
                "(with “{preview}” off). The size of burned-in subtitles is set per clip.").format(
                 crop=tr("Crop"), preview=tr("Preview")),
+            tr("{key} saves the current frame to the “frames” folder inside the output folder, in the format last "
+               "chosen in “{frames}”; subtitles are drawn when the player shows them.").format(
+                key=key_for("snapshot"), frames=_menu_path("&File", "Extract frames…")),
+            tr("{key} plays the selected clip in a loop; selecting another clip moves the loop to it.").format(
+                key=key_for("loop")),
             tr("ffmpeg / mpv paths: {tools}.").format(tools=_menu_path("&Tools", "External tools…")),
             tr("Updates: {menu} looks for a newer version on GitHub and installs it only after you agree.")
             .format(menu=_menu_path("&Help", "Check for updates…")),

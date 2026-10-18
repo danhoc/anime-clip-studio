@@ -166,7 +166,7 @@ class Project:
             video=VideoRef(**pick(VideoRef, d.get("video"))),
             markers=[Marker(**pick(Marker, m)) for m in d.get("markers", [])],
             clips=clips,
-            default_preset_id=d.get("default_preset_id", "orig_smartcut"),
+            default_preset_id=d.get("default_preset_id", "x264_crf18"),
             default_audio_track=d.get("default_audio_track"),
             default_sub_track=d.get("default_sub_track"),
             output_dir=d.get("output_dir", ""),

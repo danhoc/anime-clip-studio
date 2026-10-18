@@ -37,21 +37,26 @@ def render_name(template: str, video: str, clip: Clip, n: int, preset_id: str) -
 
 
 def resolve_conflict(path: Path, policy: str, taken: set[str]) -> Path | None:
-    if policy == "overwrite":
+    """`taken`: lower-case paths already used by this export or by jobs still in the queue. The
+    policy is about files on disk; two jobs never get the same output, even with "overwrite"."""
+    if policy == "overwrite" and str(path).lower() not in taken:
         return path
     if policy == "skip" and (path.exists() or str(path).lower() in taken):
         return None
     candidate = path
     i = 2
-    while candidate.exists() or str(candidate).lower() in taken:
+    while (candidate.exists() and policy != "overwrite") or str(candidate).lower() in taken:
         candidate = path.with_name(f"{path.stem} ({i}){path.suffix}")
         i += 1
     return candidate
 
 
 class ExportDialog(QDialog):
-    def __init__(self, doc: ProjectDocument, presets: PresetStore, settings, parent=None):
+    def __init__(self, doc: ProjectDocument, presets: PresetStore, settings, parent=None,
+                 busy: list[str] | None = None):
+        """`busy`: output paths of export jobs still waiting or running (never reused)."""
         super().__init__(parent)
+        self._busy = {str(Path(b)).lower() for b in (busy or [])}
         self.setWindowTitle(tr("Export clips"))
         self.resize(900, 520)
         self.doc, self.presets, self.settings = doc, presets, settings
@@ -154,7 +159,7 @@ class ExportDialog(QDialog):
     def items(self) -> list[ExportItem]:
         out_dir = Path(self.out.text().strip() or self.settings.output_dir)
         policy = self.policy.currentData()
-        taken: set[str] = set()
+        taken: set[str] = set(self._busy)
         video = Path(self.doc.project.video.path).stem
         result = []
         for n, (it, c, s) in enumerate(self._rows, 1):

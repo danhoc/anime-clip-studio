@@ -197,3 +197,43 @@ def test_edge_edit_follows_playhead_until_i_or_o(qapp):
     doc.delete_items([], [cid])
     assert doc.edge_edit is None
     assert not doc.start_edge_edit(oid, "in")
+
+
+def test_i_starts_a_new_clip_even_when_a_clip_is_selected(qapp):
+    from acs.core.document import ProjectDocument
+    doc = ProjectDocument()
+    doc.load(Project(), None, FrameIndex.cfr(Fraction(24), 600), None)
+    doc.set_in(1000)
+    a = doc.set_out(1200)
+    assert doc.selected_clips == [a.id]
+    doc.set_in(500)                          # went back to mark an earlier clip
+    doc.set_out(700)
+    assert sorted((c.in_frame, c.out_frame) for c in doc.project.clips) == [(500, 701), (1000, 1201)]
+    assert doc.set_out(800) is None          # no open clip: O changes nothing
+    assert sorted((c.in_frame, c.out_frame) for c in doc.project.clips) == [(500, 701), (1000, 1201)]
+
+
+def test_zoom_and_scroll_stay_undoable_but_do_not_make_the_project_changed(qapp):
+    from acs.core.document import ProjectDocument
+    doc = ProjectDocument()
+    doc.load(Project(), None, FrameIndex.cfr(Fraction(24), 600), None)
+    seen = []
+    doc.dirty_changed.connect(seen.append)
+    doc.add_marker(10)
+    doc.mark_saved()
+    assert not doc.dirty and seen == [True, False]
+    doc.set_view(100, 5)
+    assert not doc.dirty and seen == [True, False]
+    doc.undo.undo()                          # the zoom is still undoable
+    assert doc.project.view.pps == 0 and not doc.dirty
+    doc.add_marker(20)
+    assert doc.dirty
+    doc.undo.undo()
+    assert not doc.dirty
+    doc.undo.redo()
+    doc.set_view(150, 0)
+    doc.undo.undo()
+    doc.undo.undo()                          # back past the zoom and the marker: the saved state
+    assert not doc.dirty
+    doc.undo.undo()                          # before the saved state: changed
+    assert doc.dirty

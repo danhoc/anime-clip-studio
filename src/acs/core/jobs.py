@@ -211,6 +211,7 @@ class JobQueue(QObject):
         self.jobs: list[Job] = []
         self._contexts: dict[str, JobContext] = {}
         self._lock = threading.RLock()
+        self._closed = False   # shutdown(): nothing is started or persisted any more
 
     # ---- public API (main thread) ----
     def get(self, job_id: str) -> Job | None:
@@ -246,6 +247,17 @@ class JobQueue(QObject):
         for j in list(self.jobs):
             if j.status in ACTIVE:
                 self.cancel(j.id)
+
+    def shutdown(self) -> None:
+        """App exit: cancel every job and forget the queue. Jobs the user cancelled this way are not
+        offered for resuming at the next start (only a crash leaves an unfinished queue behind)."""
+        self.cancel_all()
+        with self._lock:
+            self._closed = True
+        try:
+            recovery.save_queue_state([])
+        except OSError as e:
+            log.warning("cannot persist queue: %s", e)
 
     def retry(self, job_id: str) -> None:
         job = self.get(job_id)
@@ -290,6 +302,8 @@ class JobQueue(QObject):
         self._notify(self.job_updated, job.id)
 
     def _persist(self) -> None:
+        if self._closed:
+            return
         try:
             with self._lock:
                 data = [j.to_dict() for j in self.jobs if j.status in ACTIVE]
@@ -299,6 +313,8 @@ class JobQueue(QObject):
 
     def _schedule(self) -> None:
         with self._lock:
+            if self._closed:
+                return
             running_cpu = sum(1 for j in self.jobs if j.status == RUNNING and not j.gpu)
             running_gpu = sum(1 for j in self.jobs if j.status == RUNNING and j.gpu)
             for job in self.jobs:

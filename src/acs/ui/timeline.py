@@ -31,8 +31,9 @@ from acs.ui import icons, theme
 from acs.ui.hotkeys import with_key
 
 RULER_H = 26
-LANE_H = 26
+LANE_H = 39                      # one clip lane
 LANE_GAP = 4
+MAX_LANES = 3                    # lanes shown at most; more overlapping clips are squeezed into them
 # Fixed row heights (logical px) chosen once from the screen height — the timeline does not stretch
 # with the window, so resizing panels never re-scales hundreds of thumbnails or the waveform.
 ROW_SIZES = (  # (min logical screen height, thumbnail row, waveform row)
@@ -40,8 +41,7 @@ ROW_SIZES = (  # (min logical screen height, thumbnail row, waveform row)
     (1000, 100, 80),
     (0, 76, 60),
 )
-DEFAULT_LANES = 3                # minimum clip-lane area; the splitter can make it taller
-SMALL_SCREEN_H = 800             # logical screen height below which the lane minimum drops to 2
+SMALL_SCREEN_H = 800             # logical screen height below which the main window uses smaller panes
 CLICK_PX = 4                     # a press on a clip edge that moves less than this is a click (seek)
 WAVE_REF_PERCENTILE = 99.97     # auto gain reference: (almost) the loudest moment of the track
 WAVE_KNEE = 0.85                 # above this, peaks are compressed smoothly instead of clipped
@@ -76,6 +76,29 @@ C_LANES_BG = QColor("#16181c")
 C_LANE = QColor(255, 255, 255, 10)
 
 
+def assign_lanes(clips) -> tuple[dict[str, int], int]:
+    """Greedy lane per clip so overlapping clips never hide each other: (clip id -> lane, lanes used,
+    at least 1)."""
+    lanes_end: list[int] = []
+    lanes: dict[str, int] = {}
+    for c in sorted(clips, key=lambda c: c.in_frame):
+        end = c.out_frame if c.out_frame is not None else c.in_frame + 1
+        for i, e in enumerate(lanes_end):
+            if c.in_frame >= e:
+                lanes_end[i] = end
+                lanes[c.id] = i
+                break
+        else:
+            lanes_end.append(end)
+            lanes[c.id] = len(lanes_end) - 1
+    return lanes, max(1, len(lanes_end))
+
+
+def lane_area_height(lane_count: int) -> int:
+    """Height of the clip-lane area: one full lane per lane in use, at most MAX_LANES."""
+    return max(1, min(lane_count, MAX_LANES)) * (LANE_H + LANE_GAP)
+
+
 def _sync_colors() -> None:
     """Pick up the active theme (dark / light)."""
     global C_BG, C_RULER, C_TEXT, C_DIM, C_KEY, C_GRID, C_WAVE, C_THUMBS_BG, C_WAVE_BG, C_OUTLINE, C_CLIP_TEXT
@@ -99,6 +122,7 @@ class Timeline(QWidget):
     scrub_finished = Signal(float)        # click / drag released
     hint = Signal(str)
     zoom_to_clip_requested = Signal()
+    height_changed = Signal(int)          # the fixed height grew / shrank by this much (lanes appeared / went)
     context_action = Signal(str, float)   # action id, time
 
     def __init__(self, doc: ProjectDocument, parent=None):
@@ -107,7 +131,6 @@ class Timeline(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._row_sizes = ROW_SIZES[1][1:]
-        self._min_lanes = DEFAULT_LANES
         self.position = 0.0
         self.thumb_times: np.ndarray | None = None    # sorted
         self._thumb_list: list[np.ndarray] = []       # [H, W, 3] each, as decoded, in time order
@@ -317,21 +340,14 @@ class Timeline(QWidget):
 
     # ---- layout --------------------------------------------------------------------------
     def _relayout(self):
-        """Greedy lane assignment so overlapping clips never hide each other."""
-        lanes_end: list[int] = []
-        self._lanes = {}
-        for c in sorted(self.doc.project.clips, key=lambda c: c.in_frame):
-            end = c.out_frame if c.out_frame is not None else c.in_frame + 1
-            for i, e in enumerate(lanes_end):
-                if c.in_frame >= e:
-                    lanes_end[i] = end
-                    self._lanes[c.id] = i
-                    break
-            else:
-                lanes_end.append(end)
-                self._lanes[c.id] = len(lanes_end) - 1
-        self._lane_count = max(1, len(lanes_end))
-        self.update()  # height never follows the clips: extra lanes are squeezed into the lane area
+        """Lanes for the clips; a second / third lane exists only while clips overlap."""
+        old = self.fixed_height()
+        self._lanes, self._lane_count = assign_lanes(self.doc.project.clips)
+        new = self.fixed_height()
+        if new != old:
+            self._apply_min_height()
+            self.height_changed.emit(new - old)
+        self.update()
 
     def configure_for_screen(self, logical_screen_height: int) -> None:
         """Pick fixed row heights for this display (called once by the main window)."""
@@ -339,13 +355,16 @@ class Timeline(QWidget):
             if logical_screen_height >= min_h:
                 self._row_sizes = (th, wh)
                 break
-        self._min_lanes = 2 if logical_screen_height < SMALL_SCREEN_H else DEFAULT_LANES
         self._apply_min_height()
 
+    def fixed_height(self) -> int:
+        """Fixed rows + the lanes in use (at most MAX_LANES): the timeline never stretches, the space
+        left over goes to the video."""
+        return self._clips_y + lane_area_height(self._lane_count) + 4
+
     def _apply_min_height(self) -> None:
-        """Rows above the lanes are fixed; only the clip-lane area below them may grow (splitter)."""
-        self.setMinimumHeight(self._clips_y + self._min_lanes * (LANE_H + LANE_GAP) + 4)
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self.setFixedHeight(self.fixed_height())
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
     def sizeHint(self):
         return self.minimumSizeHint()
@@ -357,11 +376,11 @@ class Timeline(QWidget):
 
     @property
     def _lanes_h(self) -> int:
-        """Height of the clip-lane area (at least the minimum number of full-size lanes)."""
-        return max(self._min_lanes * (LANE_H + LANE_GAP), self.height() - self._clips_y - 4)
+        """Height of the clip-lane area."""
+        return lane_area_height(self._lane_count)
 
     def _lane_geom(self) -> tuple[float, float]:
-        """(lane pitch, lane height): full size while the lanes fit, squeezed when clips overlap more."""
+        """(lane pitch, lane height): full size up to MAX_LANES, squeezed when more clips overlap."""
         pitch = min(float(LANE_H + LANE_GAP), self._lanes_h / max(1, self._lane_count))
         height = max(6.0, pitch - min(LANE_GAP, pitch * 0.15))
         return pitch, height
@@ -593,30 +612,23 @@ class Timeline(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     def _paint_lanes(self, p: QPainter):
-        """Clip-lane area: one stripe per lane slot, so it reads as room for clips, not empty space."""
+        """Clip-lane area: one stripe per lane in use (an empty project shows one with a hint)."""
         y0 = self._clips_y
         w = self.width()
         p.fillRect(0, y0 - 3, w, self.height() - y0 + 3, C_LANES_BG)
         pitch, height = self._lane_geom()
-        slots = max(self._lane_count, int((self._lanes_h + LANE_GAP) // pitch))
-        used = set(self._lanes.values())
-        p.setFont(self._font(9))
-        hint_done = False
-        for i in range(slots):
-            r = QRectF(0, y0 + i * pitch, w, height)
-            p.fillRect(r, C_LANE)
-            if i in used or hint_done or height < 14:
-                continue
-            hint_done = True
+        for i in range(self._lane_count):
+            p.fillRect(QRectF(0, y0 + i * pitch, w, height), C_LANE)
+        if not self._lanes:
+            p.setFont(self._font(9))
             p.setPen(C_DIM)
-            text = (tr("Clip lanes — press I to start a clip, O to end it") if not used
-                    else tr("Free clip lane — overlapping clips are placed here"))
-            p.drawText(r.adjusted(12, 0, -12, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+            p.drawText(QRectF(12, y0, w - 24, height), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       tr("Clip lanes — press I to start a clip, O to end it"))
 
     def _paint_clips(self, p: QPainter):
         sel = set(self.doc.selected_clips)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setFont(self._font(10))
+        p.setFont(self._font(11))
         for c in self.doc.project.clips:
             r = self._clip_rect(c)
             if self._drag and self._drag.get("cid") == c.id and "preview" in self._drag:
@@ -642,7 +654,7 @@ class Timeline(QWidget):
             label = c.name + ("  🔇" if c.muted else "") + ("  CC" if c.burn_subs else "")
             if r.width() > 30:
                 p.setPen(C_CLIP_TEXT)
-                p.setFont(self._font(10))
+                p.setFont(self._font(11))
                 p.drawText(r.adjusted(10, 0, -10, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                            label)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
@@ -1019,7 +1031,9 @@ class Timeline(QWidget):
             menu.addSeparator()
         add(tr("Add marker here"), "marker")
         add(tr("Set In here (new clip)"), "set_in")
-        add(tr("Set Out here"), "set_out")
+        edit = self.doc.edge_edit
+        if self.doc.open_clip() is not None or (edit is not None and edit[1] == "out"):
+            add(tr("Set Out here"), "set_out")   # O only closes an open clip (or sets an edited end)
         if hit["kind"] in ("clip", "clip_in", "clip_out"):
             self.doc.select_clips([hit["cid"]])
             menu.addSeparator()

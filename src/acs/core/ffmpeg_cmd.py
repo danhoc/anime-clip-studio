@@ -142,13 +142,15 @@ def reencode_reasons(burn_subs: bool, crop: CropRect | None, height: int | None)
 
 
 # ---- filters -----------------------------------------------------------------------------
-def subs_filters(subs: SubsSource | None, in_time: float, start_time: float) -> list[str]:
-    """Shift pts back to the original timeline for libass, then restore."""
+def subs_filters(subs: SubsSource | None, in_time: float) -> list[str]:
+    """Shift pts back to the original timeline for libass, then restore.
+
+    The extracted track is on the app's relative timeline (ffmpeg subtracts the file's start time
+    when it writes the .ass), so the offset is the relative clip start alone."""
     if subs is None:
         return []
-    offset = in_time + start_time
     return [
-        f"setpts=PTS+{offset:.6f}/TB",
+        f"setpts=PTS+{in_time:.6f}/TB",
         f"subtitles=f={subs.ass_name}:fontsdir={subs.fonts_name}",
         "setpts=PTS-STARTPTS",
     ]
@@ -196,6 +198,8 @@ def audio_args(spec: ExportSpec, info: MediaInfo, container: str) -> list[str]:
     rel = min(spec.audio_rel, len(info.audios) - 1)
     src = info.audios[rel]
     args = ["-map", f"0:a:{rel}"]
+    if src.language:   # -map_metadata -1 drops the stream tags; the language is worth keeping
+        args += ["-metadata:s:a:0", f"language={src.language}"]
     acodec = p.acodec
     if container == "webm" and acodec in ("aac", "copy") and src.codec not in ("opus", "vorbis"):
         acodec = "libopus"
@@ -205,7 +209,9 @@ def audio_args(spec: ExportSpec, info: MediaInfo, container: str) -> list[str]:
     if acodec == "copy":
         if container == "mp4" and src.codec in ("flac", "truehd", "dts", "pcm_s16le", "pcm_s24le"):
             spec.warnings.append("mp4_audio_compat")
-        args += ["-c:a", "copy"]
+        # Input -ss does not trim stream-copied packets: without this the audio would start at the
+        # keyframe before the clip (seconds of sound before the first picture in MKV).
+        args += ["-c:a", "copy", "-copypriorss", "0"]
         return args
     args += ["-c:a", acodec, "-b:a", f"{p.abitrate}k"]
     if p.downmix_stereo and src.channels > 2:
@@ -295,7 +301,7 @@ def build_encode_passes(spec: ExportSpec, info: MediaInfo, ffmpeg: str = "ffmpeg
     """One or two ffmpeg invocations for a (re-)encoded video clip."""
     p = spec.preset
     container = container_for(p, info)
-    filters = (subs_filters(spec.subs, spec.in_time, info.start_time)
+    filters = (subs_filters(spec.subs, spec.in_time)
                + geometry_filters(spec.crop, spec.height))
     vf = ["-vf", ",".join(filters)] if filters else []
     timing = ["-t", f"{spec.duration:.6f}", "-frames:v", str(spec.frames)]

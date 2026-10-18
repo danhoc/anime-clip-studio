@@ -94,3 +94,63 @@ def test_frames_interval(tmp_path):
     done = run_jobs([Job("frames", "f", {"config": cfg.to_dict()})], settings)
     assert done[0].status == DONE, done[0].message
     assert len(list((tmp_path / "frames").glob("*.png"))) == 5
+
+
+def stream_times(path: Path) -> dict:
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,start_time:format=duration",
+                        "-of", "json", str(path)], capture_output=True, text=True)
+    import json
+    d = json.loads(r.stdout)
+    out = {s["codec_type"]: float(s["start_time"]) for s in d["streams"]}
+    out["duration"] = float(d["format"]["duration"])
+    return out
+
+
+def test_smartcut_copied_audio_starts_with_the_picture(tmp_path):
+    """Long GOP, clip starting far from the keyframe before it: the copied audio must not begin there."""
+    src = tmp_path / "long_gop.mkv"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24000/1001:duration=30",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=30",
+                    "-c:v", "libx264", "-g", "240", "-keyint_min", "240", "-sc_threshold", "0",
+                    "-c:a", "aac", "-shortest", str(src)], check=True)
+    settings = AppSettings().resolved()
+    info = probe(str(src), settings.ffprobe)
+    fi = FrameIndex.from_scan(scan_packets(str(src), info.start_time, settings.ffprobe), info.fps)
+    in_f, out_f = fi.frame_at(8.5), fi.frame_at(24.0)        # keyframes at 0, 10, 20 s
+    clip = Clip(in_frame=in_f, out_frame=out_f, in_time=fi.time_of(in_f), out_time=fi.time_of(out_f), name="c")
+    out = tmp_path / "smart.mkv"
+    spec = build_export_spec_dict(src=str(src), clip=clip, in_time=clip.in_time, out_time=clip.out_time,
+                                  audio_rel=0, sub_rel=None, preset={p.id: p for p in builtin_presets()}["orig_smartcut"],
+                                  output=str(out), height_req=None, hwaccel=False, settings=settings)
+    done = run_jobs([Job("export", "smart", spec)], settings)
+    assert done[0].status == DONE, done[0].message
+    t = stream_times(out)
+    dur = clip.out_time - clip.in_time
+    assert abs(t["duration"] - dur) < 0.15, t                 # was 8.5 s longer: audio from the keyframe at 0
+    assert abs(t["audio"] - t["video"]) < 0.1, t
+
+
+def test_burned_subtitles_on_a_file_with_a_start_offset(tmp_path):
+    import numpy as np
+    srt = tmp_path / "s.srt"
+    srt.write_text("1\n00:00:05,000 --> 00:00:06,000\nHELLO\n\n", encoding="utf-8")
+    src = tmp_path / "offset.mkv"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=320x240:r=24:d=10", "-i", str(srt), "-map", "0", "-map", "1",
+                    "-c:v", "libx264", "-c:s", "ass", "-output_ts_offset", "2", str(src)], check=True)
+    settings = AppSettings().resolved()
+    info = probe(str(src), settings.ffprobe)
+    assert abs(info.start_time - 2.0) < 1e-3
+    clip = Clip(in_frame=96, out_frame=168, in_time=4.0, out_time=7.0, name="c", burn_subs=True)
+    out = tmp_path / "subs.mp4"
+    spec = build_export_spec_dict(src=str(src), clip=clip, in_time=4.0, out_time=7.0, audio_rel=None, sub_rel=0,
+                                  preset={p.id: p for p in builtin_presets()}["x264_crf18"], output=str(out),
+                                  height_req=None, hwaccel=False, settings=settings)
+    done = run_jobs([Job("export", "subs", spec)], settings)
+    assert done[0].status == DONE, done[0].message
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(out), "-vf", "fps=4,scale=32:24,format=gray",
+                          "-f", "rawvideo", "-"], capture_output=True).stdout
+    frames = np.frombuffer(raw, np.uint8).reshape(-1, 32 * 24)
+    visible = [i / 4 for i, f in enumerate(frames) if f.max() > 60]
+    assert visible and min(visible) >= 0.9 and max(visible) <= 2.1, visible   # HELLO at 5-6 s = 1-2 s in the clip

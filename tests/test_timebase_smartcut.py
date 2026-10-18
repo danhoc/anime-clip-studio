@@ -133,3 +133,22 @@ def test_parse_trace_headers():
             "[trace_headers] nal_unit_type    010100 = 20\n")
     assert parse_first_vcl_nal(text, "hevc") == 20
     assert parse_first_vcl_nal("nal_unit_type 00101 = 5", "h264") == 5
+
+
+def test_clip_ending_with_the_last_frame_keeps_it_when_the_exact_index_arrives(qapp):
+    from acs.core.document import ProjectDocument
+    from acs.core.model import Project
+    fps = Fraction(24000, 1001)
+    cfr = FrameIndex.cfr(fps, 10.0)
+    n = cfr.frame_count
+    exact = FrameIndex.from_scan(PacketScan([i / float(fps) for i in range(n)], [i % 24 == 0 for i in range(n)]),
+                                 fps)
+    assert exact.nearest_boundary(cfr.end_time) == n
+    assert exact.nearest_boundary(exact.time_of(n - 1)) == n - 1
+    assert exact.nearest_boundary(exact.time_of(10)) == 10
+    doc = ProjectDocument()
+    doc.load(Project(), None, cfr, None)
+    doc.set_in(n - 30)
+    doc.set_out(n - 1)                       # O on the last frame: Out = frame_count
+    doc.set_index(exact)
+    assert doc.project.clips[0].out_frame == n
