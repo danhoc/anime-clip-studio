@@ -130,7 +130,7 @@ class ClipPanel(QWidget):
         self.detect.setToolTip(tr("Analyse ~10 frames of the clip and suggest a crop"))
         self.crop_preview = QCheckBox(tr("Preview"))
         self.crop_preview.setToolTip(tr("Show the crop in the player"))
-        crop_row = QHBoxLayout()
+        crop_row = self.crop_row = QHBoxLayout()
         crop_row.addWidget(self.crop_mode, 1)
         crop_row.addWidget(self.detect)
         crop_row.addWidget(self.crop_preview)
@@ -403,6 +403,7 @@ class ClipPanel(QWidget):
         # The ratio and the rectangle only take room while a crop is on (fits 1080 px screens without
         # scrolling); auto mode shows the detected rectangle, only manual mode has a ratio.
         mode = clips[0].crop_mode if clips and not shorts else "none"
+        self._form.setRowVisible(self.crop_row, not shorts)   # the Shorts frame replaces the crop
         self._form.setRowVisible(self.crop_aspect, mode == "manual")
         self._form.setRowVisible(self.spin_row, mode != "none")
         self.props.setEnabled(bool(clips))
