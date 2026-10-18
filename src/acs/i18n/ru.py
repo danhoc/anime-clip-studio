@@ -55,6 +55,17 @@ RU: dict[str, str] = {
     "Help": "Справка",
     "Mouse": "Мышь",
     "Play / pause": "Воспроизведение / пауза",
+    "Forward (arrow step)": "Вперёд (шаг стрелок)",
+    "Back (arrow step)": "Назад (шаг стрелок)",
+    "Forward (Shift+arrow step)": "Вперёд (шаг Shift+стрелок)",
+    "Back (Shift+arrow step)": "Назад (шаг Shift+стрелок)",
+    "Forward (Ctrl+arrow step)": "Вперёд (шаг Ctrl+стрелок)",
+    "Back (Ctrl+arrow step)": "Назад (шаг Ctrl+стрелок)",
+    "Forward {step}": "Вперёд на {step}",
+    "Back {step}": "Назад на {step}",
+    "{x} s": "{x} с",
+    "1 frame": "1 кадр",
+    "{n} frames": "{n} кадр.",
     "Next frame": "Следующий кадр",
     "Previous frame": "Предыдущий кадр",
     "Forward 1 second": "Вперёд на 1 секунду",
@@ -71,6 +82,7 @@ RU: dict[str, str] = {
     "Set clip In (starts a new clip)": "Начало клипа In (создаёт новый клип)",
     "Set clip Out (current frame included)": "Конец клипа Out (текущий кадр включён)",
     "Delete selected clips / markers": "Удалить выделенные клипы / метки",
+    "Cancel changing a clip edge": "Отменить изменение границы клипа",
     "Ctrl + wheel": "Ctrl + колесо",
     "Zoom timeline around the cursor": "Масштаб таймлайна вокруг курсора",
     "Wheel / Shift + wheel": "Колесо / Shift + колесо",
@@ -80,6 +92,9 @@ RU: dict[str, str] = {
     "Move In / Out (snaps to frames, markers, keyframes)": "Сдвинуть In / Out (привязка к кадрам, меткам, ключевым кадрам)",
     "Alt while dragging": "Alt при перетаскивании",
     "Disable snapping": "Без привязки",
+    "Right click clip edge": "Правый клик по краю клипа",
+    "Change that edge with the playhead, then press I / O":
+        "Изменить этот край вслед за курсором воспроизведения, затем нажать I / O",
     "Ctrl + click clip": "Ctrl + клик по клипу",
     "Add clip to selection": "Добавить клип к выделению",
     "Double-click clip": "Двойной клик по клипу",
@@ -96,12 +111,23 @@ RU: dict[str, str] = {
     "Frames": "Кадры",
     "Add folders with your episodes here. Double-click an episode to open it. ● marks episodes that already have saved clips.":
         "Добавьте сюда папки с сериями. Двойной клик открывает серию. ● отмечает серии, в которых уже есть сохранённые клипы.",
-    "Space plays/pauses. ← / → step exactly one frame, Shift+arrows jump one second, Ctrl+arrows jump between keyframes.":
-        "Пробел — воспроизведение/пауза. ← / → — ровно на один кадр, Shift+стрелки — на секунду, Ctrl+стрелки — между ключевыми кадрами.",
-    "Ctrl+wheel zooms down to single frames, the wheel scrolls. Press I to start a clip and O to end it — you can mark as many clips as you like. M adds a marker. Zoom and markers can be undone with Ctrl+Z.":
-        "Ctrl+колесо приближает вплоть до отдельных кадров, колесо прокручивает. I — начало клипа, O — конец; клипов может быть сколько угодно. M добавляет метку. Масштаб и метки отменяются через Ctrl+Z.",
-    "Every clip can have its own audio track, mute, burned-in subtitles, crop, resolution and preset. ⓘ explains why a clip will be re-encoded.":
-        "У каждого клипа своя аудиодорожка, отключение звука, вшитые субтитры, кроп, разрешение и пресет. ⓘ объясняет, почему клип будет перекодирован.",
+    "Space plays/pauses. ← / → jump one second, Shift+arrows step exactly one frame, Ctrl+arrows jump between keyframes (the steps can be changed in Settings).":
+        "Пробел — воспроизведение/пауза. ← / → — на секунду, Shift+стрелки — ровно на один кадр, Ctrl+стрелки — между ключевыми кадрами (шаги меняются в настройках).",
+    "Ctrl+wheel zooms down to single frames, the wheel scrolls. Press I to start a clip and O to end it — you can mark as many clips as you like. M adds a marker. Drag a clip edge to move it, or right-click it and set it again with I / O. Ctrl+Z undoes.":
+        "Ctrl+колесо приближает вплоть до отдельных кадров, колесо прокручивает. I — начало клипа, O — конец; клипов может быть сколько угодно. M добавляет метку. Край клипа можно перетащить или щёлкнуть по нему правой кнопкой и задать заново клавишей I / O. Ctrl+Z отменяет.",
+    "All clips of the episode. Double-click a clip to jump to it, double-click its name to rename it. ⓘ explains why a clip will be re-encoded.":
+        "Все клипы серии. Двойной щелчок по клипу переходит к нему, двойной щелчок по имени — переименование. ⓘ объясняет, почему клип будет перекодирован.",
+    "Tools → Shorts Mode: every clip gets a 9:16 frame for YouTube Shorts over the video. Drag it to move it, drag a corner or turn the wheel to resize it. Only the picture inside the frame is exported; burned-in subtitles are scaled to it and placed at its bottom.":
+        "Инструменты → Режим Shorts: у каждого клипа поверх видео появляется рамка 9:16 для YouTube Shorts. Перетащите её, чтобы сдвинуть; тяните за угол или крутите колесо, чтобы изменить размер. Экспортируется только изображение внутри рамки; вшитые субтитры масштабируются под неё и встают вниз.",
+    "Settings of the selected clip: audio, burned-in subtitles and their size, crop, resolution and preset. For a manual crop pick an aspect ratio and adjust the frame right over the video.":
+        "Настройки выбранного клипа: звук, вшитые субтитры и их размер, кроп, разрешение и пресет. Для ручного кропа выберите соотношение сторон и настройте рамку прямо над видео.",
+    "F1 lists every key, Help → Quick help repeats the main ones.":
+        "F1 — все горячие клавиши, Справка → Краткая справка — самые нужные.",
+    "Required: FFmpeg (ffmpeg + ffprobe — export, frames, analysis) and libmpv (the video player). Tools → External tools… checks them; “Auto-detect” finds them in the usual places and links to the official downloads are there. Nothing is downloaded or installed automatically.":
+        "Обязательно нужны FFmpeg (ffmpeg + ffprobe — экспорт, кадры, анализ) и libmpv (видеоплеер). Инструменты → Внешние программы… проверяет их; «Найти автоматически» ищет их в обычных местах установки, там же ссылки на официальные загрузки. Сама программа ничего не скачивает и не устанавливает.",
+    "Marks from mpv": "Метки из mpv",
+    "Optional: mark while watching in your own mpv player. In Tools → External tools… choose mpv.exe and press “Install marker script into mpv”: Alt+M adds a marker, Alt+I / Alt+O a clip start / end (the keys can be changed). When you open the episode here, the marks are offered for import (also File → Import marks from mpv…).":
+        "По желанию: ставьте метки прямо при просмотре в своём плеере mpv. В Инструменты → Внешние программы… укажите mpv.exe и нажмите «Установить скрипт меток в mpv»: Alt+M — метка, Alt+I / Alt+O — начало / конец клипа (клавиши можно поменять). При открытии серии здесь метки будет предложено импортировать (также Файл → Импортировать метки из mpv…).",
     "Ctrl+E exports all clips at once. 'Original (smart cut)' keeps the source quality; other presets re-encode with x264, x265, SVT-AV1, NVENC… or make GIF/WebP.":
         "Ctrl+E экспортирует все клипы сразу. «Оригинал (smart cut)» сохраняет исходное качество; другие пресеты перекодируют через x264, x265, SVT-AV1, NVENC… или делают GIF/WebP.",
     "Ctrl+Shift+E saves many frames: every N seconds or one per scene, optionally skipping duplicates.":
@@ -122,6 +148,9 @@ RU: dict[str, str] = {
     "Preview volume": "Громкость просмотра",
     "Export queue": "Очередь экспорта",
     "History": "История",
+    "Side panel (library, queue, history)": "Боковая панель (медиатека, очередь, история)",
+    "Clip list": "Список клипов",
+    "Selected clip column": "Колонка выбранного клипа",
     "<opened>": "<открыто>",
     "Save changes to the project?": "Сохранить изменения в проекте?",
     "Open video": "Открыть видео",
@@ -147,6 +176,14 @@ RU: dict[str, str] = {
     "off": "выкл.",
     "In set. Move to the end and press O.": "Начало установлено. Перейдите к концу и нажмите O.",
     "Press I first to start a clip (Out must be after In).": "Сначала нажмите I, чтобы начать клип (Out должен быть после In).",
+    "The clip start must be before the clip end.": "Начало клипа должно быть раньше его конца.",
+    "The clip end must be after the clip start.": "Конец клипа должен быть позже его начала.",
+    "Clip start changed.": "Начало клипа изменено.",
+    "Clip end changed.": "Конец клипа изменён.",
+    "Changing the start of “{name}”: move the playhead and press I · Esc — cancel":
+        "Изменение начала «{name}»: переместите курсор воспроизведения и нажмите I · Esc — отмена",
+    "Changing the end of “{name}”: move the playhead and press O · Esc — cancel":
+        "Изменение конца «{name}»: переместите курсор воспроизведения и нажмите O · Esc — отмена",
     "Detecting black bars…": "Поиск чёрных полос…",
     "No black bars found.": "Чёрные полосы не найдены.",
     "Crop detected": "Найден кроп",
@@ -154,7 +191,6 @@ RU: dict[str, str] = {
     "There are no finished clips yet. Mark a clip with I and O.": "Готовых клипов пока нет. Отметьте клип клавишами I и O.",
     "Export settings": "Параметры экспорта",
     "Open a video first (or right-click an episode in the Library).": "Сначала откройте видео (или нажмите правой кнопкой на серии в Медиатеке).",
-    "frames": "кадры",
     "All jobs finished.": "Все задачи завершены.",
     "Settings saved.": "Настройки сохранены.",
     "Frame-accurate anime clipping with mpv + ffmpeg.": "Покадровая нарезка аниме на mpv + ffmpeg.",
@@ -169,8 +205,9 @@ RU: dict[str, str] = {
         "Откройте видео, чтобы увидеть таймлайн. I — начало клипа, O — конец.",
     "generating thumbnails…": "создание миниатюр…",
     "Move clip edge": "Сдвиг края клипа",
-    "Click — go to this clip edge · drag — move it · Alt — no snapping":
-        "Клик — перейти к этому краю клипа · перетаскивание — сдвинуть его · Alt — без привязки",
+    "Click — go to this clip edge · drag — move it · Alt — no snapping · right click — change it with the playhead":
+        "Клик — перейти к этому краю клипа · перетаскивание — сдвинуть его · Alt — без привязки · "
+        "правый клик — изменить его курсором воспроизведения",
     "Clip lanes — press I to start a clip, O to end it": "Дорожки клипов — I начинает клип, O завершает его",
     "Free clip lane — overlapping clips are placed here": "Свободная дорожка — сюда попадают перекрывающиеся клипы",
     "Drag to move the marker · Del — delete": "Тяните, чтобы сдвинуть метку · Del — удалить",
@@ -179,6 +216,9 @@ RU: dict[str, str] = {
     "Add marker here": "Добавить метку здесь",
     "Set In here (new clip)": "Начало клипа здесь (новый клип)",
     "Set Out here": "Конец клипа здесь",
+    "Change clip start (follows the playhead, I sets it)": "Изменить начало клипа (следует за курсором, I — установить)",
+    "Change clip end (follows the playhead, O sets it)": "Изменить конец клипа (следует за курсором, O — установить)",
+    "Cancel changing the clip edge": "Отменить изменение границы клипа",
     "Delete clip": "Удалить клип",
     "Delete marker": "Удалить метку",
     # ---- clip panel ----
@@ -294,6 +334,11 @@ RU: dict[str, str] = {
     "Open": "Открыть",
     "Show in Explorer": "Показать в Проводнике",
     "Remove folder from library": "Убрать папку из медиатеки",
+    "Copy file name": "Копировать имя файла",
+    "reading info…": "чтение информации…",
+    "saved work: {n} clips": "сохранённая работа: клипов — {n}",
+    "Open now": "Открыт сейчас",
+    "Double-click or Enter also opens it": "Также открывается двойным кликом или Enter",
     # ---- queue ----
     "Job": "Задача",
     "Status": "Статус",
@@ -488,6 +533,44 @@ RU: dict[str, str] = {
     "Min bits/pixel HEVC/AV1": "Мин. бит/пиксель HEVC/AV1",
     "Video file extensions": "Расширения видеофайлов",
     "Show the introduction tour on next start": "Показать вводный тур при следующем запуске",
+    "Step {keys}": "Шаг {keys}",
+    "frames": "кадров",
+    "seconds": "секунд",
+    "to the next keyframe": "до ключевого кадра",
+    "Frames step exactly; seconds go to the frame nearest that time; keyframe jumps to the next / previous keyframe.":
+        "Кадры — точный шаг; секунды — переход к кадру, ближайшему к этому времени; ключевой кадр — к следующему / предыдущему ключевому кадру.",
+    "Show the quick help at start": "Показывать краткую справку при запуске",
+    "Main keys and tips; also in Help → Quick help": "Основные клавиши и советы; также в Справка → Краткая справка",
+    # ---- quick help ----
+    "Quick help": "Краткая справка",
+    "Previous / next keyframe": "Предыдущий / следующий ключевой кадр",
+    "Back / forward by {step}": "Назад / вперёд на {step}",
+    "Previous / next marker or clip boundary": "Предыдущая / следующая метка или граница клипа",
+    "Clip start / end (the current frame is included)": "Начало / конец клипа (текущий кадр входит в клип)",
+    "Undo / redo": "Отменить / повторить",
+    "All keyboard shortcuts": "Все горячие клавиши",
+    "New clips are exported with the project's default preset (H.264 CRF 18 unless you change it in the “{box}” box next to the player). “Original (smart cut)” keeps the source quality: only the frames around the cuts are re-encoded.":
+        "Новые клипы экспортируются пресетом проекта по умолчанию (H.264 CRF 18, если не изменить его в блоке «{box}» рядом с плеером). «Оригинал (smart cut)» сохраняет исходное качество: перекодируются только кадры у мест разреза.",
+    "Work is saved automatically: reopen an episode and its clips come back (● in the Library). Ctrl+S saves the project as a file.":
+        "Работа сохраняется автоматически: откройте серию снова — клипы вернутся (● в медиатеке). Ctrl+S сохраняет проект в файл.",
+    "Drag the playhead to an edge of a zoomed timeline to scroll it. Alt while dragging a clip edge turns snapping off.":
+        "Подведите курсор воспроизведения к краю приближенного таймлайна, чтобы прокрутить его. Alt при перетаскивании края клипа отключает прилипание.",
+    "Arrow step sizes, theme, interface size and preview quality: {settings}. Language, theme and interface size apply after a restart.":
+        "Шаг стрелок, тема, размер интерфейса и качество превью: {settings}. Язык, тема и размер интерфейса применяются после перезапуска.",
+    "ffmpeg / mpv paths: {tools}.": "Пути к ffmpeg / mpv: {tools}.",
+    "Shorts Mode ({menu}): every clip gets a 9:16 YouTube Shorts frame over the video. Drag it to move it, drag a corner or turn the mouse wheel to resize it, double-click it to reset it. Only the picture inside the frame is exported; burned-in subtitles are scaled to it and placed at its bottom. The crop tool is off meanwhile.":
+        "Режим Shorts ({menu}): у каждого клипа поверх видео появляется рамка 9:16 для YouTube Shorts. Перетащите её, "
+        "чтобы сдвинуть; тяните за угол или крутите колесо мыши, чтобы изменить размер; двойной щелчок — сброс. "
+        "Экспортируется только изображение внутри рамки; вшитые субтитры масштабируются под неё и встают вниз. "
+        "Кроп в этом режиме недоступен.",
+    "Manual crop: pick an aspect ratio under “{crop}” and adjust the frame over the video the same way (with “{preview}” off). The size of burned-in subtitles is set per clip.":
+        "Ручной кроп: выберите соотношение сторон под «{crop}» и так же настройте рамку над видео (флажок "
+        "«{preview}» снят). Размер вшитых субтитров задаётся у каждого клипа.",
+    "Main keys": "Основные клавиши",
+    "Good to know": "Полезно знать",
+    "Don't show at start": "Не показывать при запуске",
+    "The quick help stays available in Help → Quick help": "Краткая справка остаётся доступной в меню Справка → Краткая справка",
+    "All shortcuts…": "Все клавиши…",
     "Changes to language or libmpv take effect after restarting the app.": "Изменения языка или libmpv вступят в силу после перезапуска.",
     # ---- markers / interface size ----
     "Rename marker…": "Переименовать метку…",
@@ -663,4 +746,39 @@ RU: dict[str, str] = {
     "before thumbnails": "перед созданием миниатюр",
     "before crop detection": "перед поиском кропа",
     "emergency save on error": "аварийное сохранение при ошибке",
+    # ---- Shorts Mode ----
+    "Shorts Mode": "Режим Shorts",
+    "Each clip gets a 9:16 YouTube Shorts frame over the video; only the picture inside the frame is exported":
+        "У каждого клипа поверх видео появляется рамка 9:16 для YouTube Shorts; экспортируется только то, что внутри рамки",
+    "Shorts Mode: drag the frame to move it, drag a corner or turn the mouse wheel to resize it, double-click it to reset it.":
+        "Режим Shorts: перетащите рамку, чтобы сдвинуть её; тяните за угол или крутите колесо мыши, чтобы изменить размер; двойной щелчок — сброс.",
+    "Shorts Mode is off.": "Режим Shorts выключен.",
+    "Shorts frame": "Рамка Shorts",
+    "Reset frame": "Сбросить рамку",
+    "Reset Shorts frame": "Сброс рамки Shorts",
+    "Full height, in the centre of the picture": "Во всю высоту, по центру кадра",
+    "Size of the exported picture": "Размер экспортируемого изображения",
+    "Not available in Shorts Mode: the Shorts frame sets the exported picture.":
+        "Недоступно в режиме Shorts: экспортируемое изображение задаёт рамка Shorts.",
+    "Shorts Mode is on: only the picture inside each clip's 9:16 frame is exported.":
+        "Включён режим Shorts: у каждого клипа экспортируется только изображение внутри его рамки 9:16.",
+    "Drag the frame over the video": "Перетаскивание рамки над видео",
+    "Move the Shorts frame (Tools → Shorts Mode) or the manual crop":
+        "Сдвинуть рамку Shorts (Инструменты → Режим Shorts) или ручной кроп",
+    "Drag a frame corner / edge, or wheel": "Угол / край рамки или колесо",
+    "Resize it (a chosen aspect ratio is kept)": "Изменить размер (выбранное соотношение сторон сохраняется)",
+    "Double-click the frame": "Двойной щелчок по рамке",
+    "Reset it to the largest size": "Сбросить до максимального размера",
+    # ---- manual crop ----
+    "Free": "Свободное",
+    "Aspect ratio": "Соотношение сторон",
+    "Crop aspect ratio": "Соотношение сторон кропа",
+    "Aspect ratio of the manual crop. Over the video: drag the frame to move it, drag a corner or an edge to resize it, double-click it to reset it (Preview off).":
+        "Соотношение сторон ручного кропа. Над видео: перетащите рамку, чтобы сдвинуть её; тяните за угол или край, чтобы изменить размер; двойной щелчок — сброс (флажок «Просмотр» снят).",
+    "Subtitle size": "Размер субтитров",
+    "Size of the burned-in dialogue (signs placed in the picture keep their size). In Shorts Mode the subtitles are also scaled to the frame and placed at its bottom automatically.":
+        "Размер вшиваемых реплик (надписи, привязанные к месту в кадре, сохраняют свой размер). В режиме Shorts субтитры также автоматически масштабируются под рамку и размещаются внизу неё.",
+    "Presets and encoding": "Пресеты и кодирование",
+    "The “Project” box sets the default preset for all clips; a clip can pick its own under “Selected clip”. 'Original (smart cut)' keeps the source quality and re-encodes only the clip edges; the others re-encode with H.264, HEVC, AV1, VP9 (NVENC on NVIDIA cards) at a CRF quality or to a target file size, or make GIF / WebP. “Presets…” creates your own: duplicate a built-in preset or start a new video, GIF or WebP preset.":
+        "Блок «Проект» задаёт пресет по умолчанию для всех клипов; клип может выбрать свой в «Выбранном клипе». «Оригинал (smart cut)» сохраняет исходное качество и перекодирует только края клипа; остальные перекодируют в H.264, HEVC, AV1, VP9 (NVENC на видеокартах NVIDIA) с качеством CRF или под заданный размер файла либо делают GIF / WebP. «Пресеты…» — создание своих: скопируйте встроенный пресет или начните новый пресет видео, GIF или WebP.",
 }

@@ -11,9 +11,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QFont, QFontMetrics, QKeySequence
-from PySide6.QtWidgets import (QApplication, QCheckBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout, QLabel,
-                               QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSplitter,
-                               QStackedWidget, QToolButton, QUndoView, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
+                               QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSplitter, QStackedWidget,
+                               QTabWidget, QToolButton, QUndoView, QVBoxLayout, QWidget)
 
 from acs import APP_TITLE, __version__
 from acs.core import mpv_markers, recovery, trace
@@ -25,9 +25,11 @@ from acs.core.export import build_export_spec_dict, run_export
 from acs.core.frames import run_frames
 from acs.core.jobs import ACTIVE, Job, JobQueue
 from acs.core.library import episode_neighbours
-from acs.core.model import CropRect, Project
+from acs.core.model import SHORTS_ASPECT, CropRect, Project
 from acs.core.presets import CODECS, PresetStore
 from acs.core.probe import ProbeError, probe, scan_packets
+from acs.core.settings import DEFAULT_STEPS, parse_step
+from acs.core import framing, shorts
 from acs.core.project_io import (PROJECT_EXT, ProjectLoadError, find_autosave, load_project, remap_frames,
                                  resolve_video, save_project, write_autosave_data)
 from acs.core.timebase import FrameIndex
@@ -41,20 +43,22 @@ from acs.ui.dispatch import MainThreadDispatcher
 from acs.ui.export_dialog import ExportDialog
 from acs.ui.flow_layout import FlowLayout
 from acs.ui.frames_dialog import FramesDialog
-from acs.ui.help import ShortcutsDialog, TourOverlay
-from acs.ui.hotkeys import key_for, with_key
+from acs.ui.help import QuickHelpDialog, ShortcutsDialog, TourOverlay
+from acs.ui.hotkeys import STEP_MODS, key_for, step_text, with_key
 from acs.ui.library_panel import LibraryPanel
+from acs.ui.panes import PaneToggle
 from acs.ui.player import MpvPlayer
 from acs.ui.preset_editor import PresetEditor
 from acs.ui.queue_panel import QueuePanel
 from acs.ui.recovery_dialog import RecoveryDialog
 from acs.ui.settings_dialog import SettingsDialog
+from acs.ui.frame_overlay import FrameOverlay, FrameTarget
 from acs.ui.tools_panel import ToolsDialog
 from acs.ui.timeline import SMALL_SCREEN_H, Timeline
 
 log = logging.getLogger("acs.ui")
 
-DOCK_STATE_VERSION = 2  # bump when the default dock arrangement changes
+DOCK_STATE_VERSION = 3  # bump when the default dock arrangement changes (3: side panel is a splitter pane)
 # Scrubbing: exact seeks (merged, one at a time) while they can keep up with the mouse; keyframe
 # seeks only when the playhead crosses more than a whole GOP during one exact seek (fast sweeps on a
 # zoomed-out timeline or a slow PC) — below that they would just repeat the same keyframe.
@@ -143,11 +147,17 @@ class MainWindow(QMainWindow):
         # One writer thread: autosaves (with fsync) never block the UI and stay in order.
         self._autosave_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="autosave")
         self._shortcuts_dlg: ShortcutsDialog | None = None
+        self._quick_help: QuickHelpDialog | None = None
+        # The tour is a parentless top-level window: without this reference Python frees it (and Qt
+        # deletes the window) as soon as show_tour returns, so neither the tour nor the quick help
+        # that follows it would ever appear.
+        self._tour: TourOverlay | None = None
         self.setWindowTitle(APP_TITLE)
         self.resize(1500, 950)
         self.setAcceptDrops(True)
         self._build_ui()
         self._build_actions()
+        self._update_step_texts()
         self._wire()
         self._restore_geometry()
         self._update_title()
@@ -167,9 +177,11 @@ class MainWindow(QMainWindow):
         self.empty.setStyleSheet(f"color: {t.dim}; font-size: 15px; background: {t.empty_bg};")
         self.player_stack.addWidget(self.empty)
         self.player: MpvPlayer | None = None
+        self.frame_overlay: FrameOverlay | None = None
         try:
             self.player = MpvPlayer(self.settings.libmpv, self.settings.hwdec, self._mpv_log_file)
             self.player_stack.addWidget(self.player)
+            self.frame_overlay = FrameOverlay(self.player)
         except Exception as e:  # noqa: BLE001 - show the reason instead of crashing
             log.exception("libmpv init failed")
             self.empty.setText(tr("The video player (libmpv) could not be started:") + f"\n{e}\n\n"
@@ -181,15 +193,16 @@ class MainWindow(QMainWindow):
         c_in, c_out, c_mark = (("#3fb36b", "#e5534b", "#d4a72c") if t.name == "dark"
                                else ("#1f8a4c", "#c0392b", "#9a6a00"))
         bar.setStyleSheet(f"#transport {{ background: {t.transport_bg}; border-top: 1px solid {t.border}; }}"
-                          "#transport QToolButton { padding: 4px 6px; }"
+                          "#transport QToolButton { padding: 4px 4px; }"
                           "#transport QToolButton#mark_in, #transport QToolButton#mark_out,"
-                          "#transport QToolButton#mark_marker { padding: 4px 10px; border-radius: 4px; }"
+                          "#transport QToolButton#mark_marker { padding: 4px 8px; border-radius: 4px; }"
                           f"#transport QToolButton#mark_in {{ color: {c_in}; border: 1px solid {c_in}; }}"
                           f"#transport QToolButton#mark_out {{ color: {c_out}; border: 1px solid {c_out}; }}"
                           f"#transport QToolButton#mark_marker {{ color: {c_mark}; border: 1px solid {c_mark}; }}")
-        # Four groups (navigation, time, marking, tracks + export) in one row on wide screens; on narrow
-        # ones (1366 px, library open) the bar wraps onto a second row instead of widening the window.
-        flow = FlowLayout(bar, spacing=16)
+        # Four groups (navigation, time, marking, tracks + export) in one row from 1920 px screens on
+        # (library open, both languages); on narrower ones (1366 px) the bar wraps onto a second row
+        # instead of widening the window.
+        flow = FlowLayout(bar, spacing=8)
         flow.setContentsMargins(6, 4, 6, 4)
 
         def group() -> QHBoxLayout:
@@ -223,15 +236,16 @@ class MainWindow(QMainWindow):
             return b
 
         self.b_ep_prev = tb("", "Previous episode in folder", "ep_prev", "ep_prev")
-        self.b_sec_prev = tb("−1s", "Back 1 second", "sec_prev")
-        self.b_frame_prev = tb("", "Previous frame", "frame_prev", "frame_prev")
+        # tooltips name the arrow keys that do the same step (see _update_step_texts)
+        self.b_sec_prev = tb("−1s", "Back 1 second")
+        self.b_frame_prev = tb("", "Previous frame", "", "frame_prev")
         self.b_play = tb("", "Play / pause", "play", "play")
         self.b_play.setIconSize(QSize(30, 30))
-        self.b_frame_next = tb("", "Next frame", "frame_next", "frame_next")
-        self.b_sec_next = tb("+1s", "Forward 1 second", "sec_next")
+        self.b_frame_next = tb("", "Next frame", "", "frame_next")
+        self.b_sec_next = tb("+1s", "Forward 1 second")
         self.b_ep_next = tb("", "Next episode in folder", "ep_next", "ep_next")
         bl = group()
-        mono = "font-family: Consolas, 'Cascadia Mono', monospace; font-size: 17px;"
+        mono = "font-family: Consolas, 'Cascadia Mono', monospace; font-size: 16px;"
         self.l_time = QLabel("--:--:--.--- / --:--:--")
         self.l_time.setStyleSheet(mono)
         self.l_time.setToolTip(tr("Current time / duration"))
@@ -240,24 +254,25 @@ class MainWindow(QMainWindow):
         self.l_frame.setToolTip(tr("Frame within the current second / frames in that second · "
                                    "#absolute frame number · K = keyframe"))
         bl.addWidget(self.l_time)
-        bl.addSpacing(6)
+        bl.addSpacing(4)
         bl.addWidget(self.l_frame)
         # Fixed widths so the buttons on the right never move while the text changes
         # (e.g. when " K" appears on keyframes or the frame number gains a digit).
         mono_font = QFont()
         mono_font.setFamilies(["Consolas", "Cascadia Mono", "Courier New"])
-        mono_font.setPixelSize(17)
-        fm = QFontMetrics(mono_font)
-        self.l_time.setFixedWidth(fm.horizontalAdvance("00:00:00.000 | 000/000  /  00:00:00") + 6)
-        self.l_frame.setFixedWidth(fm.horizontalAdvance("#00000000 K") + 6)
+        mono_font.setPixelSize(16)
+        fm = self._mono_fm = QFontMetrics(mono_font)
+        self._time_digits = 0
+        self._fit_time_label(2)   # frames per second below 100; widened in _update_labels if needed
+        self.l_frame.setFixedWidth(fm.horizontalAdvance("#0000000 K") + 6)   # 7 digits: 46 h at 60 fps
         for lab in (self.l_time, self.l_frame):
             lab.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         bl = group()
-        self.b_in = tb("[  " + tr("Clip start") + "  I", "Set clip In (starts a new clip)", "set_in",
+        self.b_in = tb("[ " + tr("Clip start") + " I", "Set clip In (starts a new clip)", "set_in",
                        bold=True, name="mark_in")
-        self.b_out = tb(tr("Clip end") + "  O  ]", "Set clip Out (current frame included)", "set_out",
+        self.b_out = tb(tr("Clip end") + " O ]", "Set clip Out (current frame included)", "set_out",
                         bold=True, name="mark_out")
-        self.b_marker = tb("⚑ " + tr("Marker") + "  M", "Add marker", "marker", bold=True, name="mark_marker")
+        self.b_marker = tb("⚑ " + tr("Marker") + " M", "Add marker", "marker", bold=True, name="mark_marker")
         bl = group()
         self.l_speed = QLabel("")
         bl.addWidget(self.l_speed)
@@ -268,7 +283,8 @@ class MainWindow(QMainWindow):
         bl.addWidget(self.c_aid)
         bl.addWidget(self.c_sid)
         self.b_mute = QToolButton()
-        self.b_mute.setText("🔇")
+        self.b_mute.setIcon(icons.icon("volume"))   # crossed out only while muted
+        self.b_mute.setIconSize(QSize(20, 20))
         self.b_mute.setCheckable(True)
         self.b_mute.setAutoRaise(True)
         self.b_mute.setToolTip(tr("Mute"))
@@ -277,11 +293,11 @@ class MainWindow(QMainWindow):
         self.vol = QSlider(Qt.Orientation.Horizontal)
         self.vol.setRange(0, 130)
         self.vol.setValue(80)
-        self.vol.setFixedWidth(70)
+        self.vol.setFixedWidth(60)
         self.vol.setToolTip(tr("Preview volume"))
         self.vol.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         bl.addWidget(self.vol)
-        bl.addSpacing(14)
+        bl.addSpacing(8)
         self.b_frames = QPushButton(icons.icon("frames"), tr("Frames…"))
         self.b_frames.setToolTip(with_key("Extract frames", "frames"))
         self.b_frames.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -293,7 +309,7 @@ class MainWindow(QMainWindow):
         self.b_export.setIconSize(QSize(18, 18))
         bl.addWidget(self.b_export)
 
-        # ---- timeline (its zoom buttons sit in the ruler) ----
+        # ---- timeline (its zoom buttons sit in a strip on its right, never over the ruler) ----
         self.timeline = Timeline(self.doc)
         screen = self.screen() or QApplication.primaryScreen()
         screen_h = screen.availableGeometry().height() if screen is not None else 1080
@@ -311,7 +327,7 @@ class MainWindow(QMainWindow):
         sl.addWidget(self.clip_panel.props)
         sl.addWidget(self.clip_panel.defaults_box)
         sl.addStretch(1)
-        props_scroll = QScrollArea()
+        props_scroll = self.props_scroll = QScrollArea()
         props_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         props_scroll.setWidget(side)
         props_scroll.setWidgetResizable(True)
@@ -323,6 +339,7 @@ class MainWindow(QMainWindow):
         self.top_split.setStretchFactor(0, 4)
         self.top_split.setStretchFactor(1, 1)
         self.top_split.setCollapsible(0, False)
+        self.props_pane = PaneToggle(self.top_split, 1, 320)
 
         # Player / timeline / clip table. The timeline's thumbnail and waveform rows have a fixed
         # height and sit right under the transport bar; dragging the handle below the timeline only
@@ -336,41 +353,51 @@ class MainWindow(QMainWindow):
         tv.setSpacing(0)
         tv.addWidget(self.top_split, 1)
         tv.addWidget(bar)
+        tl_block = QWidget()
+        th = QHBoxLayout(tl_block)
+        th.setContentsMargins(0, 0, 0, 0)
+        th.setSpacing(0)
+        th.addWidget(self.timeline, 1)
+        th.addWidget(self.timeline.zoom_bar)
         self.split = QSplitter(Qt.Orientation.Vertical)
         self.split.addWidget(top)
-        self.split.addWidget(self.timeline)
+        self.split.addWidget(tl_block)
         self.split.addWidget(self.clip_panel)
         self.split.setStretchFactor(0, 3)
         self.split.setStretchFactor(1, 0)
         self.split.setStretchFactor(2, 1)
-        for i in range(3):
+        for i in range(2):
             self.split.setCollapsible(i, False)
-        self._timeline_block = self.timeline
-        self.setCentralWidget(self.split)
-        QTimer.singleShot(0, self._initial_split_sizes)
+        # the clip list can be dragged away completely (the timeline then gets its height)
+        self.clips_pane = PaneToggle(self.split, 2, self.clip_panel.minimumHeight() * 2)
+        self._timeline_block = tl_block
 
-        # ---- docks ----
+        # ---- side panel: library, export queue and history as tabs (Ctrl+L toggles the library) ----
+        # A splitter pane rather than dock widgets, so that, like the Selected clip column, dragging its
+        # edge to the window border hides it completely.
         self.library = LibraryPanel(self.settings, self.dispatch)
-        self.d_library = QDockWidget(tr("Library"), self)
-        self.d_library.setObjectName("dock_library")
-        self.d_library.setWidget(self.library)
-        # Library, export queue and history share one tabbed side panel (Ctrl+L toggles the library).
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.d_library)
         self.queue_panel = QueuePanel(self.queue)
-        self.d_queue = QDockWidget(tr("Export queue"), self)
-        self.d_queue.setObjectName("dock_queue")
-        self.d_queue.setWidget(self.queue_panel)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.d_queue)
         self.undo_view = QUndoView(self.doc.undo)
         self.undo_view.setEmptyLabel(tr("<opened>"))
-        self.d_history = QDockWidget(tr("History"), self)
-        self.d_history.setObjectName("dock_history")
-        self.d_history.setWidget(self.undo_view)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.d_history)
-        self.tabifyDockWidget(self.d_library, self.d_queue)
-        self.tabifyDockWidget(self.d_queue, self.d_history)
-        self.d_library.raise_()
-        self.resizeDocks([self.d_library], [340 if screen_h < SMALL_SCREEN_H else 460], Qt.Orientation.Horizontal)
+        self.side = QTabWidget()
+        self.side.setDocumentMode(True)
+        # long tab names (Russian) must not set the panel's minimum width: they elide instead
+        self.side.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
+        self.side.tabBar().setUsesScrollButtons(False)
+        self.side.addTab(self.library, tr("Library"))
+        self.side.addTab(self.queue_panel, tr("Export queue"))
+        self.side.addTab(self.undo_view, tr("History"))
+        self.outer = QSplitter(Qt.Orientation.Horizontal)
+        self.outer.addWidget(self.split)
+        self.outer.addWidget(self.side)
+        self.outer.setStretchFactor(0, 1)
+        self.outer.setStretchFactor(1, 0)
+        self.outer.setCollapsible(0, False)
+        # ~16 % of the screen width: 300 px on 1920 px screens leaves the transport bar its single row
+        screen_w = screen.availableGeometry().width() if screen is not None else 1920
+        self.side_pane = PaneToggle(self.outer, 1, min(420, max(280, round(screen_w * 0.156))))
+        self.setCentralWidget(self.outer)
+        QTimer.singleShot(0, self._initial_split_sizes)
 
         self.hint = QLabel("")
         self.statusBar().addWidget(self.hint, 1)
@@ -393,16 +420,25 @@ class MainWindow(QMainWindow):
         self._autosave_safety.start()
 
     def _initial_split_sizes(self) -> None:
-        """Proportional default sizes (or the ones saved last time)."""
+        """Proportional default sizes (or the ones saved last time, hidden panes included)."""
         saved = self.settings.splitter_sizes or {}
-        h, w = self.split.height(), self.top_split.width()
+        for pane, key in ((self.side_pane, "side"), (self.clips_pane, "clips"), (self.props_pane, "props")):
+            if isinstance(saved.get("last", {}).get(key), int) and saved["last"][key] > 0:
+                pane.size = saved["last"][key]
+        side = saved.get("side")
+        total = self.outer.width()
+        self.outer.setSizes(side if side and len(side) == 2 else [max(0, total - self.side_pane.size),
+                                                                   self.side_pane.size])
+        h, w = self.split.height(), self.outer.sizes()[0]
         v = saved.get("v")
         tl_h = self._timeline_block.minimumSizeHint().height()   # fixed rows + the default lanes
         rest = max(0, h - tl_h)
-        table = max(self.clip_panel.minimumHeight(), int(rest * 0.25))
+        table = max(self.clip_panel.minimumHeight(), int(rest * 0.22))
         self.split.setSizes(v if v and len(v) == 3 else [max(0, h - tl_h - table), tl_h, table])
         t = saved.get("h")
-        self.top_split.setSizes(t if t and len(t) == 2 else [int(w * 0.78), int(w * 0.22)])
+        self.top_split.setSizes(t if t and len(t) == 2 else [int(w * 0.74), int(w * 0.26)])
+        for pane in (self.side_pane, self.clips_pane, self.props_pane):
+            pane.sync()
 
     def _act(self, menu, action_id: str, text: str, fn, extra_keys: tuple[str, ...] = ()) -> QAction:
         a = QAction(tr(text), self)
@@ -452,17 +488,20 @@ class MainWindow(QMainWindow):
         m_edit.addSeparator()
         self._act(m_edit, "set_in", "Set clip In", self.set_in)
         self._act(m_edit, "set_out", "Set clip Out", self.set_out)
+        self.a_cancel_edge = self._act(m_edit, "cancel_edge", "Cancel changing a clip edge",
+                                       self.doc.cancel_edge_edit)
+        self.a_cancel_edge.setEnabled(False)   # Esc stays free for everything else
         self._act(m_edit, "marker", "Add marker", self.add_marker)
         self._act(m_edit, "delete", "Delete selected", self.delete_selected)
 
         m_play = mb.addMenu(tr("&Playback"))
         self._act(m_play, "play", "Play / pause", self.toggle_play)
-        self._act(m_play, "frame_next", "Next frame", self.frame_next)
-        self._act(m_play, "frame_prev", "Previous frame", self.frame_prev)
-        self._act(m_play, "sec_next", "Forward 1 second", lambda: self.jump_seconds(1.0))
-        self._act(m_play, "sec_prev", "Back 1 second", lambda: self.jump_seconds(-1.0))
-        self._act(m_play, "key_next", "Next keyframe", lambda: self.jump_keyframe(1))
-        self._act(m_play, "key_prev", "Previous keyframe", lambda: self.jump_keyframe(-1))
+        self._step_actions: dict[str, QAction] = {}
+        for mod in STEP_MODS:
+            for d, suffix in ((1, "next"), (-1, "prev")):
+                aid = f"step_{mod}_{suffix}"
+                self._step_actions[aid] = self._act(m_play, aid, step_text(*self._step_setting(mod), d),
+                                                    lambda m=mod, d=d: self.step(m, d))
         self._act(m_play, "mark_next", "Next marker / clip boundary", lambda: self.jump_mark(1))
         self._act(m_play, "mark_prev", "Previous marker / clip boundary", lambda: self.jump_mark(-1))
         self._act(m_play, "shuttle_back", "Shuttle: back 1 second", self.shuttle_back)
@@ -478,18 +517,31 @@ class MainWindow(QMainWindow):
         self._act(m_view, "zoom_fit", "Fit whole video", self.timeline.zoom_fit)
         self._act(m_view, "zoom_clip", "Zoom to selected clip", self._zoom_clip)
         m_view.addSeparator()
-        self._act(m_view, "library", "Show / hide library", lambda: self.toggle_panel(self.d_library))
-        self._act(m_view, "queue", "Show / hide export queue", lambda: self.toggle_panel(self.d_queue))
+        self._act(m_view, "library", "Show / hide library", lambda: self.toggle_panel(self.library))
+        self._act(m_view, "queue", "Show / hide export queue", lambda: self.toggle_panel(self.queue_panel))
         m_view.addSeparator()
-        for d in (self.d_library, self.d_queue, self.d_history):
-            m_view.addAction(d.toggleViewAction())
+        # panes that can also be hidden by dragging their edge to the window border
+        for pane, text in ((self.side_pane, "Side panel (library, queue, history)"),
+                           (self.clips_pane, "Clip list"), (self.props_pane, "Selected clip column")):
+            a = self._act(m_view, "", text, lambda p=pane: p.toggle())
+            a.setCheckable(True)
+            a.setChecked(True)
+            pane.changed.connect(a.setChecked)
 
         m_tools = mb.addMenu(tr("&Tools"))
+        self.a_shorts = self._act(m_tools, "", "Shorts Mode", lambda: self.set_shorts_mode(self.a_shorts.isChecked()))
+        self.a_shorts.setCheckable(True)
+        self.a_shorts.setChecked(self.settings.shorts_mode)
+        self.a_shorts.setToolTip(tr("Each clip gets a 9:16 YouTube Shorts frame over the video; "
+                                    "only the picture inside the frame is exported"))
+        m_tools.setToolTipsVisible(True)
+        m_tools.addSeparator()
         self._act(m_tools, "", "Export presets…", self.edit_presets)
         self._act(m_tools, "", "External tools…", lambda: self.open_tools(auto=False))
         self._act(m_tools, "", "Settings…", self.open_settings)
 
         m_help = mb.addMenu(tr("&Help"))
+        self._act(m_help, "", "Quick help", self.show_quick_help)
         self._act(m_help, "help", "Keyboard shortcuts", self.show_shortcuts)
         self._act(m_help, "", "Show introduction tour", self.show_tour)
         self._act(m_help, "", "About", self._about)
@@ -514,6 +566,7 @@ class MainWindow(QMainWindow):
         self.c_sid.changed.connect(self._preview_sid_changed)
         self.vol.valueChanged.connect(lambda v: self.player and self.player.set_volume(v))
         self.b_mute.toggled.connect(lambda m: self.player and self.player.set_mute(m))
+        self.b_mute.toggled.connect(lambda m: self.b_mute.setIcon(icons.icon("muted" if m else "volume")))
         self.timeline.zoom_to_clip_requested.connect(self._zoom_clip)
         self.timeline.seek_requested.connect(self.seek)
         self.timeline.scrub_moved.connect(self.scrub)
@@ -530,6 +583,11 @@ class MainWindow(QMainWindow):
         self.doc.project_changed.connect(self._schedule_autosave)
         self.doc.view_changed.connect(lambda: self._schedule_autosave(title=False))
         self.doc.dirty_changed.connect(lambda _d: self._update_title())
+        self.doc.edge_edit_changed.connect(self._on_edge_edit)
+        self.doc.selection_changed.connect(self._update_frame)
+        self.doc.clips_changed.connect(self._update_frame)
+        if self.frame_overlay is not None:
+            self.frame_overlay.rect_edited.connect(self._on_frame_edited)
         self.queue.job_finished.connect(self._job_finished)
         self.doc.undo.indexChanged.connect(self._trace_undo)
         self.queue.job_updated.connect(self._trace_job)
@@ -922,6 +980,7 @@ class MainWindow(QMainWindow):
         self._pos = t
         self.timeline.set_position(t, follow=not self._paused)
         self._update_labels()
+        self._update_frame()
 
     def _on_pause(self, paused: bool) -> None:
         self._paused = paused
@@ -939,10 +998,19 @@ class MainWindow(QMainWindow):
         idx = self.doc.index
         pos, total = idx.frame_in_second(f)
         width = len(str(total))
+        if width != self._time_digits:
+            self._fit_time_label(width)
         self.l_time.setText(f"{fmt_time(self.doc.time_of(f))} | {pos:0{width}d}/{total}"
-                            f"  /  {fmt_time(idx.end_time, ms=False)}")
+                            f" / {fmt_time(idx.end_time, ms=False)}")
         key = " K" if idx.exact and idx.is_keyframe(f) else ""
         self.l_frame.setText(f"#{f}{key}")
+
+    def _fit_time_label(self, digits: int) -> None:
+        """Fixed width for 'time | frame/frames / duration' with this many digits per frame count, so
+        the buttons on the right never move while the text changes."""
+        self._time_digits = digits
+        n = "0" * max(2, digits)
+        self.l_time.setFixedWidth(self._mono_fm.horizontalAdvance(f"00:00:00.000 | {n}/{n} / 00:00:00") + 6)
 
     def seek(self, t: float, precise: bool = True) -> None:
         if not self.doc.has_video or self.player is None:
@@ -954,6 +1022,7 @@ class MainWindow(QMainWindow):
         self.player.seek(t, precise)
         self.timeline.set_position(t, follow=True, margin=0)
         self._update_labels()
+        self._update_frame()
 
     def scrub(self, t: float) -> None:
         """Playhead dragged: the timeline follows the mouse at once; the picture uses exact seeks,
@@ -991,9 +1060,14 @@ class MainWindow(QMainWindow):
             self.seek(self._pos)
 
     def scrub_end(self, t: float) -> None:
+        """Mouse released after a click / drag on the timeline: pause on the frame under the mouse."""
         self._scrub_settle.stop()
         self._scrubbing = False
-        if self._last_seek != (self.doc.time_of(self.doc.frame_at(max(0.0, t))), True):
+        was_playing = self.player is not None and not self._paused
+        if self.player is not None:
+            self.player.set_paused(True)
+        # while playing, the picture has moved on since the last seek: go back to the released frame
+        if was_playing or self._last_seek != (self.doc.time_of(self.doc.frame_at(max(0.0, t))), True):
             self.seek(t)
 
     def seek_frame(self, f: int) -> None:
@@ -1011,6 +1085,38 @@ class MainWindow(QMainWindow):
     def frame_prev(self) -> None:
         if self.player is not None and self.doc.has_video:
             self.player.frame_back_step()
+
+    def _step_setting(self, mod: str) -> tuple[str, float]:
+        return parse_step(getattr(self.settings, f"step_{mod}"), DEFAULT_STEPS[mod])
+
+    def step(self, mod: str, direction: int) -> None:
+        """Arrow keys (mod = arrow / shift / ctrl): frames, seconds or a keyframe, as set in Settings."""
+        kind, value = self._step_setting(mod)
+        if kind == "keyframe":
+            self.jump_keyframe(direction)
+        elif kind == "seconds":
+            self.jump_seconds(direction * value)
+        elif value == 1:
+            self.frame_next() if direction > 0 else self.frame_prev()   # mpv's exact frame step
+        elif self.doc.has_video:
+            self.seek_frame(self.doc.frame_at(self._pos) + direction * int(value))
+
+    def _update_step_texts(self) -> None:
+        """Menus, the cheat sheet and the transport tooltips follow the arrow steps set in Settings."""
+        for aid, a in self._step_actions.items():
+            _, mod, suffix = aid.split("_")
+            text = step_text(*self._step_setting(mod), 1 if suffix == "next" else -1)
+            a.setText(text)
+            a.setToolTip(f"{text} ({key_for(aid)})")
+        for b, tip, step, suffix in ((self.b_frame_prev, "Previous frame", ("frames", 1.0), "prev"),
+                                     (self.b_frame_next, "Next frame", ("frames", 1.0), "next"),
+                                     (self.b_sec_prev, "Back 1 second", ("seconds", 1.0), "prev"),
+                                     (self.b_sec_next, "Forward 1 second", ("seconds", 1.0), "next")):
+            mod = next((m for m in STEP_MODS if self._step_setting(m) == step), None)
+            b.setToolTip(f"{tr(tip)} ({key_for(f'step_{mod}_{suffix}')})" if mod else tr(tip))
+        if self._shortcuts_dlg is not None:   # rebuilt with the new texts when shown next
+            self._shortcuts_dlg.deleteLater()
+            self._shortcuts_dlg = None
 
     def jump_seconds(self, dt: float) -> None:
         self.seek(self._pos + dt)
@@ -1100,6 +1206,7 @@ class MainWindow(QMainWindow):
     def _preview_crop(self, rect: CropRect | None) -> None:
         if self.player is not None:
             self.player.set_crop(rect.as_mpv() if rect is not None else None)
+        self._update_frame()   # the crop rectangle is edited on the uncropped picture only
 
     # =========================================================================================
     # Editing
@@ -1109,14 +1216,48 @@ class MainWindow(QMainWindow):
 
     def set_in(self) -> None:
         if self.doc.has_video:
-            self.doc.set_in(self._cur_frame())
-            self.statusBar().showMessage(tr("In set. Move to the end and press O."), 3000)
+            self._set_in_at(self._cur_frame())
 
     def set_out(self) -> None:
-        if not self.doc.has_video:
+        if self.doc.has_video:
+            self._set_out_at(self._cur_frame())
+
+    def _set_in_at(self, f: int) -> None:
+        editing = self.doc.edge_edit is not None and self.doc.edge_edit[1] == "in"
+        if self.doc.set_in(f) is None:
+            self.statusBar().showMessage(tr("The clip start must be before the clip end."), 4000)
+        elif editing:
+            self.statusBar().showMessage(tr("Clip start changed."), 3000)
+        else:
+            self.statusBar().showMessage(tr("In set. Move to the end and press O."), 3000)
+
+    def _set_out_at(self, f: int) -> None:
+        editing = self.doc.edge_edit is not None and self.doc.edge_edit[1] == "out"
+        if self.doc.set_out(f) is None:
+            self.statusBar().showMessage(tr("The clip end must be after the clip start.") if editing
+                                         else tr("Press I first to start a clip (Out must be after In)."), 4000)
+        elif editing:
+            self.statusBar().showMessage(tr("Clip end changed."), 3000)
+
+    def start_edge_edit(self, edge: str) -> None:
+        """Right click on a clip edge: that edge follows the playhead until I / O sets it."""
+        c = self.doc.selected_clip()
+        if c is None or not self.doc.start_edge_edit(c.id, edge):
             return
-        if self.doc.set_out(self._cur_frame()) is None:
-            self.statusBar().showMessage(tr("Press I first to start a clip (Out must be after In)."), 4000)
+        self.seek_frame(c.in_frame if edge == "in" else c.out_frame - 1)
+
+    def _on_edge_edit(self) -> None:
+        edit = self.doc.edge_edit
+        self.a_cancel_edge.setEnabled(edit is not None)
+        c = self.doc.project.clip_by_id(edit[0]) if edit is not None else None
+        if c is None:
+            self.statusBar().clearMessage()
+        elif edit[1] == "in":
+            self.statusBar().showMessage(tr("Changing the start of “{name}”: move the playhead and press I "
+                                            "· Esc — cancel").format(name=c.name))
+        else:
+            self.statusBar().showMessage(tr("Changing the end of “{name}”: move the playhead and press O "
+                                            "· Esc — cancel").format(name=c.name))
 
     def add_marker(self) -> None:
         if self.doc.has_video:
@@ -1135,10 +1276,13 @@ class MainWindow(QMainWindow):
         if action == "marker":
             self.doc.add_marker(f)
         elif action == "set_in":
-            self.doc.set_in(f)
+            self._set_in_at(f)
         elif action == "set_out":
-            if self.doc.set_out(f) is None:
-                self.statusBar().showMessage(tr("Press I first to start a clip (Out must be after In)."), 4000)
+            self._set_out_at(f)
+        elif action in ("edit_in", "edit_out"):
+            self.start_edge_edit(action[5:])
+        elif action == "cancel_edge_edit":
+            self.doc.cancel_edge_edit()
         elif action == "zoom_clip":
             self._zoom_clip()
         elif action == "delete":
@@ -1179,6 +1323,62 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage(tr("Crop detected") + f": {rect.w}x{rect.h}+{rect.x}+{rect.y}", 5000)
         self.doc.update_clips(clip_ids, {"crop": rect, "crop_mode": "auto"}, tr("Detect crop"))
+
+    # =========================================================================================
+    # Shorts Mode
+    # =========================================================================================
+    def set_shorts_mode(self, on: bool) -> None:
+        """Tools → Shorts Mode: each clip shows its 9:16 frame over the video and exports only the
+        picture inside it; the crop tool is unavailable meanwhile (clip crops are kept, not used)."""
+        trace.log("shorts", f"mode {'on' if on else 'off'}")
+        self.settings.shorts_mode = on
+        self.settings.save()
+        self.a_shorts.setChecked(on)
+        self.clip_panel.refresh()   # crop controls, sizes and modes follow the mode
+        self._update_frame()
+        self.statusBar().showMessage(
+            tr("Shorts Mode: drag the frame to move it, drag a corner or turn the mouse wheel to resize it, "
+               "double-click it to reset it.") if on else tr("Shorts Mode is off."), 8000 if on else 3000)
+
+    def _frame_clip(self):
+        """The clip whose Shorts frame / crop is shown: the one under the playhead (a selected one
+        first), else the selected clip."""
+        f = self._cur_frame()
+        here = [c for c in self.doc.project.clips
+                if c.in_frame <= f and (c.out_frame is None or f < c.out_frame)]
+        sel = set(self.doc.selected_clips)
+        return next((c for c in here if c.id in sel), here[0] if here else self.doc.selected_clip())
+
+    def _update_frame(self) -> None:
+        """Show the editable rectangle over the video: the clip's Shorts frame in Shorts Mode,
+        otherwise its manual crop (unless the crop preview shows the cropped picture instead)."""
+        if self.frame_overlay is None:
+            return
+        v = self.doc.info.video if self.doc.has_video else None
+        c = self._frame_clip() if v is not None else None
+        target = None
+        if c is not None:
+            dar = framing.display_aspect(v.width, v.height, v.sar)
+            if self.settings.shorts_mode:
+                target = FrameTarget("shorts", c.id, shorts.fractions(c.shorts, dar), dar,
+                                     SHORTS_ASPECT, shorts.MIN_HEIGHT)
+            elif (c.crop_mode == "manual" and c.crop is not None and c.crop.is_valid()
+                  and not self.clip_panel.crop_preview.isChecked()):
+                target = FrameTarget("crop", c.id, framing.from_crop(c.crop, v.width, v.height), dar,
+                                     framing.parse_aspect(c.crop_aspect, dar))
+        self.frame_overlay.set_target(target)
+
+    def _on_frame_edited(self, kind: str, clip_id: str, rect) -> None:
+        v = self.doc.info.video if self.doc.has_video else None
+        c = self.doc.project.clip_by_id(clip_id)
+        if v is None or c is None:
+            return
+        dar = framing.display_aspect(v.width, v.height, v.sar)
+        if kind == "shorts":
+            self.doc.set_clip_fields(clip_id, {"shorts": shorts.from_fractions(rect, dar)}, tr("Shorts frame"))
+        else:
+            crop = framing.to_crop(rect, v.width, v.height, v.sar, framing.parse_aspect(c.crop_aspect, dar))
+            self.doc.set_clip_fields(clip_id, {"crop": crop, "crop_mode": "manual"}, tr("Crop"))
 
     # =========================================================================================
     # Export / frames
@@ -1300,15 +1500,14 @@ class MainWindow(QMainWindow):
             spec = build_export_spec_dict(src=src, clip=c, in_time=c.in_time, out_time=c.out_time,
                                           audio_rel=effective_audio(p, info, c), sub_rel=effective_sub(p, info, c),
                                           preset=s.preset, output=str(it.output), height_req=s.height_req,
-                                          hwaccel=self.settings.hwdec, settings=self.settings)
+                                          hwaccel=self.settings.hwdec, settings=self.settings, info=info)
             codec = CODECS.get(s.preset.vcodec)
             gpu = bool(codec and codec.gpu and s.preset.kind == "video" and s.preset.mode == "encode")
             jobs.append(Job("export", f"{Path(src).stem} · {c.name} → {it.output.name}", spec, gpu=gpu))
         trace.log("export", f"enqueue {len(jobs)} jobs: " + "; ".join(
             f"{j.title} preset={j.spec['preset']['id']} gpu={j.gpu}" for j in jobs))
         self.queue.enqueue(jobs, before_start=lambda: self._snapshot("before-export"))
-        self.d_queue.show()
-        self.d_queue.raise_()
+        self.show_panel(self.queue_panel)
 
     def extract_frames(self, path: str | None) -> None:
         current = self.doc.project.video.path if self.doc.has_video else None
@@ -1337,12 +1536,11 @@ class MainWindow(QMainWindow):
         self.settings.frames_last = dlg.remember()
         self.settings.frames_template = cfg.template
         self.settings.save()
-        job = Job("frames", f"{Path(path).stem} · " + tr("frames") + f" → {Path(cfg.out_dir).name}",
+        job = Job("frames", f"{Path(path).stem} · " + tr("Frames") + f" → {Path(cfg.out_dir).name}",
                   {"config": cfg.to_dict()})
         trace.log("frames", f"enqueue {job.title} config={cfg.to_dict()}")
         self.queue.enqueue([job], before_start=lambda: self._snapshot("before-frames"))
-        self.d_queue.show()
-        self.d_queue.raise_()
+        self.show_panel(self.queue_panel)
 
     def _job_finished(self, job_id: str) -> None:
         job = self.queue.get(job_id)
@@ -1363,6 +1561,7 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec():
             self.library.refresh()
+            self._update_step_texts()
             self.statusBar().showMessage(tr("Settings saved."), 4000)
             changed = [k for k in self.RESTART_FIELDS if getattr(self.settings, k) != before[k]]
             if changed or getattr(dlg, "libmpv_changed", False):
@@ -1393,19 +1592,49 @@ class MainWindow(QMainWindow):
 
     def show_shortcuts(self) -> None:
         if self._shortcuts_dlg is None:
-            self._shortcuts_dlg = ShortcutsDialog(self)
+            self._shortcuts_dlg = ShortcutsDialog(self, {aid: a.text() for aid, a in self._step_actions.items()})
         self._shortcuts_dlg.show()
         self._shortcuts_dlg.raise_()
 
-    def show_tour(self) -> None:
+    def show_quick_help(self) -> None:
+        if self._quick_help is not None:
+            self._quick_help.show()
+            self._quick_help.raise_()
+            return
+        dlg = QuickHelpDialog({m: self._step_setting(m) for m in STEP_MODS}, self.settings.show_quick_help, self)
+
+        def closed(never: bool):
+            self._quick_help = None
+            if self.settings.show_quick_help == never:
+                self.settings.show_quick_help = not never
+                self.settings.save()
+
+        dlg.closed.connect(closed)
+        dlg.shortcuts_requested.connect(self.show_shortcuts)
+        self._quick_help = dlg
+        dlg.show()
+        dlg.raise_()
+
+    def show_tour(self, then_quick_help: bool = False) -> None:
+        if self._tour is not None:
+            self._tour.raise_()
+            return
+        trace.log("ui", f"tour started (then quick help: {then_quick_help})")
         targets = {"library": self.library, "player": self.player_stack, "timeline": self.timeline,
-                   "clips": self.clip_panel, "export": self.queue_panel, "frames": self.queue_panel}
-        self.d_library.show()
-        tour = TourOverlay(self, targets)
+                   "clips": self.clip_panel, "export": self.b_export, "frames": self.b_frames,
+                   "shorts": self.player_stack, "props": self.props_scroll,
+                   "presets": self.clip_panel.defaults_box, "tools": self.menuBar(),
+                   "mpv": self.menuBar(), "help": self.menuBar()}
+        self.show_panel(self.library)
+        tour = self._tour = TourOverlay(self, targets)
 
         def done(never: bool):
+            self._tour = None
+            trace.log("ui", f"tour finished (don't show again: {never})")
             self.settings.show_tour = not never
             self.settings.save()
+            if then_quick_help:
+                self.show_quick_help()
 
         tour.finished.connect(done)
         tour.start()
@@ -1441,8 +1670,7 @@ class MainWindow(QMainWindow):
                                          n=len(pending)))
             if r == QMessageBox.StandardButton.Yes:
                 self.queue.enqueue(pending)
-                self.d_queue.show()
-                self.d_queue.raise_()
+                self.show_panel(self.queue_panel)
             else:
                 recovery.save_queue_state([])
         recovery.cleanup_work_dirs()
@@ -1459,8 +1687,11 @@ class MainWindow(QMainWindow):
                         o.unlink()
                     except OSError:
                         pass
+        # First start: the tour, then the quick help; later starts: the quick help until it is turned off.
         if self.settings.show_tour:
-            QTimer.singleShot(400, self.show_tour)
+            QTimer.singleShot(400, lambda: self.show_tour(then_quick_help=self.settings.show_quick_help))
+        elif self.settings.show_quick_help:
+            QTimer.singleShot(400, self.show_quick_help)
 
     # =========================================================================================
     # Window events
@@ -1487,13 +1718,17 @@ class MainWindow(QMainWindow):
             # A state saved by an older dock layout (library on the left) is ignored.
             self.restoreState(QByteArray.fromBase64(s.window_state.encode()), DOCK_STATE_VERSION)
 
-    def toggle_panel(self, dock: QDockWidget) -> None:
-        """Show + bring the tab to front, or hide it if it is already the visible tab."""
-        if dock.isVisible() and not dock.visibleRegion().isEmpty():
-            dock.hide()
+    def show_panel(self, page: QWidget) -> None:
+        """Open the side panel (if hidden) on this tab."""
+        self.side_pane.set_open(True)
+        self.side.setCurrentWidget(page)
+
+    def toggle_panel(self, page: QWidget) -> None:
+        """Show + bring the tab to front, or hide the side panel if it is already the visible tab."""
+        if self.side_pane.is_open() and self.side.currentWidget() is page:
+            self.side_pane.set_open(False)
         else:
-            dock.show()
-            dock.raise_()
+            self.show_panel(page)
 
     def closeEvent(self, ev):
         trace.log("ui", "main window close requested")
@@ -1512,7 +1747,10 @@ class MainWindow(QMainWindow):
         self._autosave_writer.shutdown(wait=True)
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         self.settings.window_state = bytes(self.saveState(DOCK_STATE_VERSION).toBase64()).decode()
-        self.settings.splitter_sizes = {"v": self.split.sizes(), "h": self.top_split.sizes()}
+        self.settings.splitter_sizes = {"v": self.split.sizes(), "h": self.top_split.sizes(),
+                                        "side": self.outer.sizes(),
+                                        "last": {"side": self.side_pane.size, "clips": self.clips_pane.size,
+                                                 "props": self.props_pane.size}}
         self.settings.save()
         self.library.shutdown()
         if self.player is not None:

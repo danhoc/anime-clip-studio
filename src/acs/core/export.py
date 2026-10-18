@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 from acs.core import anim, smartcut
+from acs.core.clipinfo import effective_crop
 from acs.core.ffmpeg_cmd import (ExportSpec, auto_height, bits_per_pixel, bpp_threshold, build_encode_passes,
                                  clamp_height, reencode_reasons, scaled_width, size_video_kbps, source_dims)
 from acs.core.jobs import JobContext, JobError, clean_stderr
@@ -15,7 +16,7 @@ from acs.core.presets import CODECS, Preset
 from acs.core.probe import MediaInfo, probe, scan_packets
 from acs.core.recovery import part_path
 from acs.core.settings import AppDirs
-from acs.core.subs import SubsError, prepare_subs
+from acs.core.subs import SubsError, fit_subs, prepare_subs, remove_fitted, shorts_sub_scale
 from acs.core.timebase import FrameIndex
 
 SIZE_TOLERANCE = 1.03
@@ -25,17 +26,21 @@ ENC_MIN_PSNR = 30.0
 
 def build_export_spec_dict(*, src: str, clip, in_time: float, out_time: float, audio_rel: int | None,
                            sub_rel: int | None, preset: Preset, output: str, height_req: int | None,
-                           hwaccel: bool, settings) -> dict:
-    """Serializable job spec (stored in the persisted queue for crash recovery)."""
-    crop = clip.crop if clip.crop_mode in ("auto", "manual") and clip.crop and clip.crop.is_valid() else None
+                           hwaccel: bool, settings, info: MediaInfo | None = None) -> dict:
+    """Serializable job spec (stored in the persisted queue for crash recovery).
+
+    In Shorts Mode (needs `info` for the picture size) the clip's 9:16 frame replaces its crop."""
+    shorts = bool(getattr(settings, "shorts_mode", False)) and info is not None
+    crop = effective_crop(clip, info, shorts)
     return {
         "src": src, "clip_id": clip.id, "clip_name": clip.name,
         "in_frame": clip.in_frame, "out_frame": clip.out_frame, "in_time": in_time, "out_time": out_time,
         "audio_rel": None if clip.muted else audio_rel,
         "burn_subs": bool(clip.burn_subs and sub_rel is not None), "sub_rel": sub_rel,
+        "sub_scale": max(10, clip.sub_size) / 100,
         "crop": None if crop is None else {"x": crop.x, "y": crop.y, "w": crop.w, "h": crop.h},
         "height_req": height_req, "preset": preset.to_dict(), "output": output, "hwaccel": hwaccel,
-        "bpp_x264": settings.bpp_x264, "bpp_hevc_av1": settings.bpp_hevc_av1,
+        "bpp_x264": settings.bpp_x264, "bpp_hevc_av1": settings.bpp_hevc_av1, "shorts": shorts,
     }
 
 
@@ -70,8 +75,16 @@ def run_export(ctx: JobContext, job) -> None:
     if s.get("burn_subs"):
         try:
             subs = prepare_subs(src, info, int(s["sub_rel"] or 0), st.ffmpeg)
+            # dialogue inside the exported picture (Shorts frame or crop), at the chosen size
+            v = info.video
+            scale = float(s.get("sub_scale") or 1.0)
+            if s.get("shorts") and crop is not None:
+                scale *= shorts_sub_scale(crop.h, v.height)
+            subs = fit_subs(subs, v.width, v.height, crop, scale, job.id)
         except SubsError as e:
             raise JobError(f"subtitles: {e}") from e
+        except OSError as e:
+            raise JobError(f"subtitles: cannot prepare the subtitle file: {e}") from e
     src_w, src_h = source_dims(info, crop)
     height = clamp_height(s.get("height_req"), src_h)
     spec = ExportSpec(src=src, in_frame=s["in_frame"], out_frame=s["out_frame"], in_time=s["in_time"],
@@ -97,6 +110,7 @@ def run_export(ctx: JobContext, job) -> None:
                 part.unlink()
             except OSError:
                 pass
+        remove_fitted(subs)
         shutil.rmtree(work, ignore_errors=True)
 
 

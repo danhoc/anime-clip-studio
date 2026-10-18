@@ -81,6 +81,13 @@ def apply(app, name: str) -> Theme:
     global _current
     t = resolve(name, app)
     _current = t
+    if name in ("dark", "light"):
+        # Also the native window frames (Windows title bars of the main window and the dialogs);
+        # "system" keeps following the system setting. Set before the palette, which it must not reset.
+        try:
+            app.styleHints().setColorScheme(Qt.ColorScheme.Dark if t is DARK else Qt.ColorScheme.Light)
+        except AttributeError:   # Qt < 6.8
+            pass
     app.setStyle("Fusion")
     p = QPalette()
     C = QColor

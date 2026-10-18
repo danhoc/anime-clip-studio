@@ -23,6 +23,7 @@ class ProjectDocument(QObject):
     loaded = Signal()
     index_ready = Signal()
     dirty_changed = Signal(bool)
+    edge_edit_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -34,6 +35,8 @@ class ProjectDocument(QObject):
         self.undo.cleanChanged.connect(self._on_clean_changed)
         self.selected_clips: list[str] = []
         self.selected_markers: list[str] = []
+        # (clip id, "in" | "out"): that edge follows the playhead until I / O sets it (not undoable)
+        self.edge_edit: tuple[str, str] | None = None
 
     def _on_clean_changed(self, clean: bool) -> None:
         self.dirty_changed.emit(not clean)
@@ -55,7 +58,9 @@ class ProjectDocument(QObject):
         self.project_path = project_path
         self.undo.clear()
         self.selected_clips, self.selected_markers = [], []
+        self.edge_edit = None
         self.loaded.emit()
+        self.edge_edit_changed.emit()
         self.markers_changed.emit()
         self.clips_changed.emit()
         self.view_changed.emit()
@@ -149,6 +154,8 @@ class ProjectDocument(QObject):
         if cid in self.selected_clips:
             self.selected_clips.remove(cid)
             self.selection_changed.emit()
+        if self.edge_edit is not None and self.edge_edit[0] == cid:
+            self.cancel_edge_edit()
         self.clips_changed.emit()
         self._changed()
 
@@ -220,9 +227,20 @@ class ProjectDocument(QObject):
         self.undo.push(AddClipCmd(self, c))
         return c
 
-    def set_in(self, frame: int) -> Clip:
-        """I key: move In of the open/selected clip, or start a new open clip."""
+    def set_in(self, frame: int) -> Clip | None:
+        """I key: move In of the open/selected clip, or start a new open clip.
+
+        While the In edge of a clip is being changed, sets that In instead (None when it would not be
+        before the clip's Out; the edit then stays active)."""
         frame = self.clamp_frame(frame)
+        edited = self._edge_edit_clip("in")
+        if edited is not None:
+            if edited.out_frame is not None and frame >= edited.out_frame:
+                return None
+            self.cancel_edge_edit()
+            self.set_clip_fields(edited.id, {"in_frame": frame}, tr("Set In"))
+            self.select_clips([edited.id])
+            return edited
         open_c = self.open_clip()
         if open_c is not None:
             self.set_clip_fields(open_c.id, {"in_frame": frame}, tr("Set In"))
@@ -236,6 +254,14 @@ class ProjectDocument(QObject):
     def set_out(self, frame: int) -> Clip | None:
         """O key: close the open clip (Out is inclusive of the current frame)."""
         out = min(self.clamp_frame(frame) + 1, self.frame_count)
+        edited = self._edge_edit_clip("out")
+        if edited is not None:
+            if out <= edited.in_frame:
+                return None
+            self.cancel_edge_edit()
+            self.set_clip_fields(edited.id, {"out_frame": out}, tr("Set Out"))
+            self.select_clips([edited.id])
+            return edited
         target = self.open_clip() or self.selected_clip()
         if target is None:
             return None
@@ -244,6 +270,35 @@ class ProjectDocument(QObject):
         self.set_clip_fields(target.id, {"out_frame": out}, tr("Set Out"))
         self.select_clips([target.id])
         return target
+
+    # ---- changing an edge of an existing clip by moving the playhead ------------------------
+    def start_edge_edit(self, cid: str, edge: str) -> bool:
+        """Make the In ("in") or Out ("out") edge of a closed clip follow the playhead, like the Out
+        of a clip that was just started; set_in / set_out then fix the new position."""
+        c = self.project.clip_by_id(cid)
+        if c is None or c.out_frame is None or edge not in ("in", "out"):
+            return False
+        self.edge_edit = (cid, edge)
+        self.select_clips([cid])
+        self.edge_edit_changed.emit()
+        return True
+
+    def cancel_edge_edit(self) -> None:
+        if self.edge_edit is not None:
+            self.edge_edit = None
+            self.edge_edit_changed.emit()
+
+    def _edge_edit_clip(self, edge: str) -> Clip | None:
+        """The clip whose `edge` is being changed. Pressing the other edge's key ends the edit and
+        then works as usual."""
+        if self.edge_edit is None:
+            return None
+        cid, e = self.edge_edit
+        c = self.project.clip_by_id(cid)
+        if c is None or e != edge:
+            self.cancel_edge_edit()
+            return None
+        return c
 
     def set_clip_fields(self, cid: str, fields: dict, text: str = "Edit clip") -> None:
         c = self.project.clip_by_id(cid)

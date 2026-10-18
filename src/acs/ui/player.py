@@ -400,6 +400,14 @@ class MpvPlayer(QWidget):
         except Exception as e:  # noqa: BLE001 - older libmpv without video-crop
             log.info("video-crop unsupported: %s", e)
 
+    def set_osd_overlay(self, ass: str | None, res_x: int = 0, res_y: int = 0) -> None:
+        """ASS events drawn by mpv over the picture (coordinates in a res_x × res_y space); None
+        removes them. Asynchronous: called for every mouse move while the Shorts frame is dragged."""
+        if ass is None:
+            self._cmd_async("osd-overlay", "1", "none", "")
+        else:
+            self._cmd_async("osd-overlay", "1", "ass-events", ass, str(res_x), str(res_y))
+
     def shutdown(self) -> None:
         if not self._alive:
             return

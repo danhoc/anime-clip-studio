@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from acs.core.ffmpeg_cmd import (auto_height, bits_per_pixel, bpp_threshold, clamp_height, reencode_reasons,
+from acs.core.ffmpeg_cmd import (REASON_CROP, REASON_SHORTS, auto_height, bits_per_pixel, bpp_threshold, clamp_height, reencode_reasons,
                                  requested_height, scaled_width, size_video_kbps, source_dims)
 from acs.core.model import Clip, Project
 from acs.core.presets import Preset, PresetStore
 from acs.core.probe import MediaInfo
+from acs.core.shorts import crop_rect
 
 
 def pick_track(langs: list[str], tracks) -> int | None:
@@ -75,7 +76,11 @@ def effective_sub(project: Project, info: MediaInfo | None, clip: Clip) -> int |
     return rel
 
 
-def effective_crop(clip: Clip):
+def effective_crop(clip: Clip, info: MediaInfo | None = None, shorts: bool = False):
+    """Shorts Mode: the clip's 9:16 frame (the crop tool is off); otherwise its crop, if any."""
+    if shorts:
+        v = info.video if info is not None else None
+        return crop_rect(clip.shorts, v.width, v.height, v.sar) if v is not None else None
     if clip.crop_mode in ("auto", "manual") and clip.crop is not None and clip.crop.is_valid():
         return clip.crop
     return None
@@ -95,12 +100,15 @@ def summarize(project: Project, store: PresetStore, info: MediaInfo | None, clip
     p = effective_preset(project, store, clip)
     if info is None or info.video is None:
         return ClipSummary(p, p.kind)
-    crop = effective_crop(clip)
+    shorts = bool(getattr(settings, "shorts_mode", False))
+    crop = effective_crop(clip, info, shorts)
     src_w, src_h = source_dims(info, crop)
     req = requested_height(clip.target_height, p)
     h = clamp_height(req, src_h)
     sub = effective_sub(project, info, clip)
     reasons = reencode_reasons(sub is not None, crop, h)
+    if shorts:
+        reasons = [REASON_SHORTS if r == REASON_CROP else r for r in reasons]
     notes: list[str] = []
     if clip.burn_subs and sub is None:
         notes.append("no_text_subs")

@@ -1,15 +1,23 @@
-"""Library dock: user folders scanned recursively, lazy ffprobe metadata, project badges."""
+"""Library dock: user folders scanned recursively, lazy ffprobe metadata, project badges.
+
+Episode names wrap onto up to three lines in the tree (the rest elided in the middle, so the episode
+number and extension at the end stay visible); the selected file is also shown in full in a details
+strip under it, and hovering a name shows a tooltip with the full name, folder and metadata.
+"""
 
 from __future__ import annotations
 
+import html
 import os
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer, Signal
-from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QPushButton,
+from PySide6.QtCore import QFileSystemWatcher, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QFontMetrics, QPalette, QTextLayout, QTextOption
+from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+                               QMenu, QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from acs.core import trace
@@ -23,6 +31,10 @@ from acs.ui.dispatch import MainThreadDispatcher
 
 PATH_ROLE = Qt.ItemDataRole.UserRole
 KIND_ROLE = Qt.ItemDataRole.UserRole + 1
+META_ROLE = Qt.ItemDataRole.UserRole + 2     # FileMeta once probed
+CLIPS_ROLE = Qt.ItemDataRole.UserRole + 3    # clip count of the autosave, None without one
+NAME_LINES = 3                               # file names wrap onto at most this many lines
+_BREAK_AFTER = set("._-)]}\\/, ")
 
 
 def _autosave_clips(path: str) -> int | None:
@@ -32,6 +44,102 @@ def _autosave_clips(path: str) -> int | None:
         return None
     data = read_json(auto, {}) or {}
     return len(data.get("clips", []))
+
+
+def _breakable(text: str) -> str:
+    """Zero-width break points after separators, so a QLabel can wrap names without spaces."""
+    return "".join(ch + "\u200b" if ch in _BREAK_AFTER else ch for ch in text)
+
+
+def wrap_name(text: str, font: QFont, width: int, max_lines: int = NAME_LINES) -> list[str]:
+    """`text` wrapped at word boundaries and separators into at most `max_lines` lines of `width` px;
+    what does not fit is elided in the middle of the last line (the end of a name tells episodes apart)."""
+    if width <= 0:
+        return [text]
+    full = _breakable(text)
+    layout = QTextLayout(full, font)
+    opt = QTextOption()
+    opt.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    layout.setTextOption(opt)
+    spans = []
+    layout.beginLayout()
+    while True:
+        line = layout.createLine()
+        if not line.isValid():
+            break
+        line.setLineWidth(width)
+        spans.append((line.textStart(), line.textLength()))
+    layout.endLayout()
+    lines = [full[a:a + n] for a, n in spans[:max_lines]]
+    if len(spans) > max_lines:
+        rest = full[spans[max_lines - 1][0]:].replace("​", "")
+        lines[-1] = QFontMetrics(font).elidedText(rest, Qt.TextElideMode.ElideMiddle, width)
+    return [ln.replace("​", "") for ln in lines]
+
+
+class _NameDelegate(QStyledItemDelegate):
+    """Name column: files wrap onto up to NAME_LINES lines instead of being cut to one."""
+
+    def __init__(self, tree: QTreeWidget):
+        super().__init__(tree)
+        self._tree = tree
+
+    def _text_width(self, index) -> int:
+        depth = 1   # top-level items are indented too (decorated root)
+        p = index.parent()
+        while p.isValid():
+            depth += 1
+            p = p.parent()
+        margin = self._tree.style().pixelMetric(QStyle.PixelMetric.PM_FocusFrameHMargin) + 1
+        return self._tree.columnWidth(0) - depth * self._tree.indentation() - 2 * margin
+
+    def _lines(self, opt: QStyleOptionViewItem, index) -> list[str] | None:
+        if index.column() != 0 or index.data(KIND_ROLE) != "file":
+            return None
+        return wrap_name(opt.text, opt.font, self._text_width(index))
+
+    def sizeHint(self, option, index) -> QSize:  # noqa: N802 - Qt API
+        size = super().sizeHint(option, index)
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        lines = self._lines(opt, index)
+        if not lines or len(lines) < 2:
+            return size
+        return QSize(size.width(), size.height() + (len(lines) - 1) * QFontMetrics(opt.font).lineSpacing())
+
+    def paint(self, painter, option, index) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        lines = self._lines(opt, index)
+        if lines is None:
+            super().paint(painter, option, index)
+            return
+        opt.text = ""   # background, selection and focus come from the style, the text is drawn here
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, opt.widget)
+        step = QFontMetrics(opt.font).lineSpacing()
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        painter.save()
+        painter.setFont(opt.font)
+        painter.setPen(opt.palette.color(QPalette.ColorRole.HighlightedText if selected
+                                         else QPalette.ColorRole.Text))
+        y = rect.top() + (rect.height() - len(lines) * step) / 2
+        for ln in lines:
+            painter.drawText(QRectF(rect.left(), y, rect.width(), step),
+                             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), ln)
+            y += step
+        painter.restore()
+
+
+def _meta_text(m: FileMeta | None) -> str:
+    if m is None:
+        return ""
+    if m.error:
+        return tr("error")
+    depth = " 10-bit" if m.bit_depth > 8 else ""
+    parts = [fmt_duration(m.duration), f"{m.resolution()} {m.codec}{depth}".strip(), f"🔊{m.audio} 💬{m.subs}"]
+    return " · ".join(p for p in parts if p)
 
 
 def _files(node: FolderNode):
@@ -55,6 +163,8 @@ class LibraryPanel(QWidget):
         self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="meta")
         self._items: dict[str, QTreeWidgetItem] = {}
         self._current = ""
+        self._selected = ""     # file picked with one click
+        self._reselect = ""     # ... picked again once a rescan has rebuilt the tree
         self._watcher = QFileSystemWatcher(self)
         self._watcher.directoryChanged.connect(lambda _p: self._rescan_timer.start())
         self._rescan_timer = QTimer(self)
@@ -101,10 +211,19 @@ class LibraryPanel(QWidget):
         hdr.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         hdr.customContextMenuRequested.connect(self._header_menu)
         self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
-        self.setMinimumWidth(340)
+        self.tree.setItemDelegateForColumn(0, _NameDelegate(self.tree))
+        self.tree.setAlternatingRowColors(True)   # tells neighbouring multi-line names apart
+        # wrapped names change their row height with the column width: re-measure rows after a resize
+        self._relayout_timer = QTimer(self)
+        self._relayout_timer.setSingleShot(True)
+        self._relayout_timer.setInterval(60)
+        self._relayout_timer.timeout.connect(self.tree.doItemsLayout)
+        hdr.sectionResized.connect(lambda i, _old, _new: self._relayout_timer.start() if i == 0 else None)
+        self.setMinimumWidth(280)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         lay.addWidget(self.tree, 1)
+        lay.addWidget(self._build_details())
         self.empty = QLabel(tr("Add a folder with your episodes,\nor drag a video file into the window."))
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty.setStyleSheet(theme.css_dim())
@@ -117,6 +236,7 @@ class LibraryPanel(QWidget):
         # itemActivated fires on double-click *and* Enter; also connecting itemDoubleClicked
         # opened the same episode twice per double-click.
         self.tree.itemActivated.connect(self._activated)
+        self.tree.currentItemChanged.connect(lambda cur, _prev: self._on_current(cur))
         self.tree.customContextMenuRequested.connect(self._menu)
         self.refresh()
 
@@ -143,6 +263,7 @@ class LibraryPanel(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
+        self._reselect = self._selected
         self.tree.clear()
         self._items.clear()
         dirs = self._watcher.directories()
@@ -191,6 +312,10 @@ class LibraryPanel(QWidget):
             self.tree.setUpdatesEnabled(True)
         self._apply_filter(self.search.text())
         self.highlight(self._current)
+        it = self._items.get(os.path.normcase(self._reselect)) if self._reselect else None
+        if it is not None:
+            self._reselect = ""
+            self.tree.setCurrentItem(it)
 
     def _fill(self, parent: QTreeWidgetItem, node: FolderNode, info: dict) -> None:
         for sub in node.folders:
@@ -206,7 +331,6 @@ class LibraryPanel(QWidget):
             it = QTreeWidgetItem([os.path.basename(f), "", "", "", ""])
             it.setData(0, PATH_ROLE, f)
             it.setData(0, KIND_ROLE, "file")
-            it.setToolTip(0, f)
             parent.addChild(it)
             self._items[os.path.normcase(f)] = it
             clips, meta = info.get(f, (None, None))
@@ -214,6 +338,7 @@ class LibraryPanel(QWidget):
             if meta is not None:
                 self._show_meta(it, meta)
             else:
+                self._file_tooltip(it)
                 self._pool.submit(self._fetch_meta, f)
 
     def _fetch_meta(self, path: str) -> None:
@@ -224,8 +349,12 @@ class LibraryPanel(QWidget):
         it = self._items.get(os.path.normcase(path))
         if it is not None:
             self._show_meta(it, meta)
+            if it is self.tree.currentItem():
+                self._show_details(it)
 
     def _show_meta(self, it: QTreeWidgetItem, m: FileMeta) -> None:
+        it.setData(0, META_ROLE, m)
+        self._file_tooltip(it)
         if m.error:
             it.setText(2, tr("error"))
             it.setToolTip(2, m.error)
@@ -238,11 +367,20 @@ class LibraryPanel(QWidget):
         it.setToolTip(2, f"{m.resolution()} {m.codec}{depth}")
         it.setText(3, tracks)
         it.setToolTip(3, tr("Audio tracks / subtitle tracks"))
+
+    @staticmethod
+    def _file_tooltip(it: QTreeWidgetItem) -> None:
+        """Full name first (the tree elides it), then the folder and what is known about the file."""
         path = it.data(0, PATH_ROLE)
-        it.setToolTip(0, f"{path}\n{m.resolution()} {m.codec}{depth} · {fmt_duration(m.duration)} · {tracks}")
+        lines = [f"<b>{html.escape(os.path.basename(path))}</b>", html.escape(os.path.dirname(path))]
+        meta = _meta_text(it.data(0, META_ROLE))
+        if meta:
+            lines.append(html.escape(meta))
+        it.setToolTip(0, "<p style='white-space:pre'>" + "<br>".join(lines) + "</p>")
 
     @staticmethod
     def _set_badge(it: QTreeWidgetItem, clips: int | None) -> None:
+        it.setData(0, CLIPS_ROLE, clips)
         if clips is None:
             it.setText(4, "")
             return
@@ -254,6 +392,8 @@ class LibraryPanel(QWidget):
         it = self._items.get(os.path.normcase(path))
         if it is not None:
             self._set_badge(it, _autosave_clips(path) if clips is None else clips)
+            if it is self.tree.currentItem():
+                self._show_details(it)
 
     def highlight(self, path: str) -> None:
         self._current = path
@@ -266,6 +406,7 @@ class LibraryPanel(QWidget):
         it = self._items.get(os.path.normcase(path)) if path else None
         if it is not None:
             self.tree.scrollToItem(it)
+        self._on_current(self.tree.currentItem())
 
     def _apply_filter(self, text: str) -> None:
         text = text.strip().casefold()
@@ -299,11 +440,72 @@ class LibraryPanel(QWidget):
         if kind == "file":
             menu.addAction(tr("Open"), lambda: self.open_requested.emit(path))
             menu.addAction(tr("Extract frames…"), lambda: self.frames_requested.emit(path))
+            menu.addAction(tr("Copy file name"), lambda: QApplication.clipboard().setText(os.path.basename(path)))
         menu.addAction(tr("Show in Explorer"), lambda: self._reveal(path))
         if kind == "root":
             menu.addSeparator()
             menu.addAction(tr("Remove folder from library"), self._remove_folder)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    # ---- details of the selected file ----
+    def _build_details(self) -> QFrame:
+        box = QFrame()
+        box.setObjectName("libdetails")
+        t = theme.current()
+        box.setStyleSheet(f"#libdetails {{ background: {t.alt_base}; border: 1px solid {t.border}; "
+                          f"border-radius: 4px; }}")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(8, 6, 8, 6)
+        v.setSpacing(2)
+        self.d_name = QLabel()
+        f = self.d_name.font()
+        f.setBold(True)
+        self.d_name.setFont(f)
+        self.d_folder = QLabel()
+        self.d_folder.setStyleSheet(theme.css_dim())
+        self.d_meta = QLabel()
+        self.d_meta.setStyleSheet(theme.css_info())
+        for w in (self.d_name, self.d_folder, self.d_meta):
+            w.setTextFormat(Qt.TextFormat.PlainText)
+            w.setWordWrap(True)
+            v.addWidget(w)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 2, 0, 0)
+        self.d_hint = QLabel()
+        self.d_hint.setStyleSheet(theme.css_dim())
+        self.d_open = QPushButton(tr("Open"))
+        self.d_open.clicked.connect(lambda: self._selected and self.open_requested.emit(self._selected))
+        row.addWidget(self.d_hint, 1)
+        row.addWidget(self.d_open)
+        v.addLayout(row)
+        box.hide()
+        self.details = box
+        return box
+
+    def _on_current(self, it: QTreeWidgetItem | None) -> None:
+        if it is not None and it.data(0, KIND_ROLE) == "file":
+            self._selected = it.data(0, PATH_ROLE)
+            self._reselect = ""
+            self._show_details(it)
+        else:
+            self._selected = ""
+            self.details.hide()
+
+    def _show_details(self, it: QTreeWidgetItem) -> None:
+        path = it.data(0, PATH_ROLE)
+        self.d_name.setText(_breakable(os.path.basename(path)))
+        self.d_folder.setText(_breakable(os.path.dirname(path)))
+        meta = it.data(0, META_ROLE)
+        parts = [_meta_text(meta) if meta is not None else tr("reading info…")]
+        clips = it.data(0, CLIPS_ROLE)
+        if clips is not None:
+            parts.append(tr("saved work: {n} clips").format(n=clips))
+        self.d_meta.setText(" · ".join(p for p in parts if p))
+        self.d_meta.setToolTip(meta.error if meta is not None and meta.error else "")
+        is_open = bool(self._current) and os.path.normcase(path) == os.path.normcase(self._current)
+        self.d_hint.setText(tr("Open now") if is_open else tr("Double-click or Enter also opens it"))
+        self.d_open.setVisible(not is_open)
+        self.details.show()
 
     def _header_menu(self, pos) -> None:
         menu = QMenu(self)

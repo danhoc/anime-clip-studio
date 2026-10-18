@@ -1,7 +1,9 @@
 """Timeline widget: ruler, thumbnails, waveform, keyframes, clip lanes, markers, playhead.
 
 Zoom/scroll changes go through ProjectDocument.set_view (undoable, merged); auto-follow during
-playback changes the view without touching the undo stack.
+playback changes the view without touching the undo stack. While the playhead, a clip edge or a
+marker is dragged near (or past) an edge of a zoomed timeline, the view glides that way — at the
+mouse's own speed while it moves, at a speed set by how far past the edge it is while it rests.
 
 Rendering: everything that depends only on the view (thumbnails, waveform, ruler, lane stripes,
 frame grid) is drawn once into a cached pixmap; clips, markers and the playhead are painted on top,
@@ -11,11 +13,13 @@ so moving the playhead repaints a few pixels instead of the whole widget.
 from __future__ import annotations
 
 import math
+import time
+from collections import deque
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import QColorDialog, QHBoxLayout, QInputDialog, QMenu, QSizePolicy, QToolButton, QWidget
+from PySide6.QtWidgets import QColorDialog, QInputDialog, QMenu, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 from acs.core import trace
 from acs.core.document import ProjectDocument
@@ -23,7 +27,7 @@ from acs.core.model import MARKER_COLOR_NAMES, MARKER_COLORS
 from acs.core.util import fmt_time
 from acs.core.waveform import DEFAULT_BPS
 from acs.i18n import tr
-from acs.ui import theme
+from acs.ui import icons, theme
 from acs.ui.hotkeys import with_key
 
 RULER_H = 26
@@ -44,6 +48,15 @@ WAVE_KNEE = 0.85                 # above this, peaks are compressed smoothly ins
 EDGE_PX = 6
 SNAP_PX = 8
 MAX_PX_PER_FRAME = 48
+# Edge scrolling while dragging on a zoomed timeline (all in logical px / seconds).
+EDGE_ZONE_PX = 48                # the view starts to glide this close to an edge
+EDGE_SPEED = 700                 # view speed (px/s) with the mouse resting at the very edge
+EDGE_MAX_DEPTH = 3.0             # past the edge the resting speed keeps growing up to this many zones
+EDGE_FOLLOW = 1.0                # while the mouse moves towards the edge, the view moves this fast too
+EDGE_AWAY_PX_S = 60              # moving back from the edge faster than this stops the glide
+EDGE_VELOCITY_S = 0.08           # mouse speed is measured over this window
+EDGE_RAMP_UP, EDGE_RAMP_DOWN = 10.0, 30.0   # 1/s: how quickly the glide speeds up / slows down
+EDGE_TICK_MS = 16
 TICK_STEPS = [1 / 24, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200]
 
 C_BG = QColor("#1b1d22")
@@ -83,7 +96,7 @@ def _sync_colors() -> None:
 class Timeline(QWidget):
     seek_requested = Signal(float)        # click: exact seek
     scrub_moved = Signal(float)           # dragging the playhead
-    scrub_finished = Signal(float)        # drag released
+    scrub_finished = Signal(float)        # click / drag released
     hint = Signal(str)
     zoom_to_clip_requested = Signal()
     context_action = Signal(str, float)   # action id, time
@@ -104,58 +117,63 @@ class Timeline(QWidget):
         self.wave_bps = DEFAULT_BPS
         self.wave_ref = 255.0
         self._drag: dict | None = None
+        self._drag_pos = QPointF()
+        self._drag_alt = False
+        self._moves: deque[tuple[float, float]] = deque()   # (time, x) of recent drag moves
+        self._edge_speed = 0.0                              # current glide, view px/s (signed)
+        self._edge_last = 0.0
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setInterval(EDGE_TICK_MS)
+        self._edge_timer.timeout.connect(self._edge_tick)
         self._fonts: dict[int, QFont] = {}
         self._bg: QPixmap | None = None
         self._bg_key: tuple | None = None
         _sync_colors()   # the theme only changes after a restart
         self._lanes: dict[str, int] = {}
         self._lane_count = 1
-        self._corner = self._build_corner()
+        self.zoom_bar = self._build_zoom_bar()
         self._apply_min_height()
         doc.markers_changed.connect(self.update)
         doc.clips_changed.connect(self._relayout)
         doc.view_changed.connect(self.update)
         doc.selection_changed.connect(self.update)
+        doc.edge_edit_changed.connect(self.update)
         doc.loaded.connect(self._on_loaded)
         doc.index_ready.connect(self.update)
 
-    def _build_corner(self) -> QWidget:
-        """Zoom buttons in the right end of the ruler (no separate toolbar row above the timeline)."""
-        corner = QWidget(self)
-        corner.setObjectName("tl_corner")
-        corner.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        corner.setStyleSheet(f"#tl_corner {{ background: {C_RULER.name()}; }}"
-                             "#tl_corner QToolButton { padding: 0px 5px; }")
-        lay = QHBoxLayout(corner)
-        lay.setContentsMargins(2, 0, 2, 0)
-        lay.setSpacing(0)
-        for text, tip, aid, fn in (("−", "Zoom timeline out", "zoom_out", lambda: self.zoom_at(1 / 1.5)),
-                                   ("+", "Zoom timeline in (also Ctrl+wheel)", "zoom_in", lambda: self.zoom_at(1.5)),
-                                   ("⤢", "Fit whole video", "zoom_fit", self.zoom_fit),
-                                   ("◫", "Zoom to selected clip", "zoom_clip", self.zoom_to_clip_requested.emit)):
-            b = QToolButton(corner)
-            b.setText(text)
-            b.setToolTip(with_key(tip, aid))
+    def _build_zoom_bar(self) -> QWidget:
+        """Zoom buttons in a narrow column for the right of the timeline (the owner lays it out):
+        over the ruler they hid its right end, exactly where the playhead goes when scrolling on."""
+        bar = QWidget()
+        bar.setObjectName("tl_zoom")
+        bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        bar.setStyleSheet(f"#tl_zoom {{ background: {C_RULER.name()}; border-left: 1px solid {C_BG.name()}; }}")
+        lay = QVBoxLayout(bar)
+        lay.setContentsMargins(1, 1, 1, 1)
+        lay.setSpacing(2)
+        for kind, tip, fn in (("zoom_in", "Zoom timeline in (also Ctrl+wheel)", lambda: self.zoom_at(1.5)),
+                              ("zoom_out", "Zoom timeline out", lambda: self.zoom_at(1 / 1.5)),
+                              ("zoom_fit", "Fit whole video", self.zoom_fit),
+                              ("zoom_clip", "Zoom to selected clip", self.zoom_to_clip_requested.emit)):
+            b = QToolButton(bar)
+            b.setIcon(icons.icon(kind))
+            b.setIconSize(QSize(16, 16))
+            b.setToolTip(with_key(tip, kind))
             b.setAutoRaise(True)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            b.setFixedHeight(RULER_H - 2)
+            b.setFixedSize(28, RULER_H)
             b.clicked.connect(fn)
             lay.addWidget(b)
-        corner.setFixedHeight(RULER_H)
-        corner.adjustSize()
-        corner.hide()   # shown once a video is open
-        return corner
-
-    def _place_corner(self) -> None:
-        self._corner.move(self.width() - self._corner.width(), 0)
+        lay.addStretch(1)
+        bar.setEnabled(False)   # until a video is open
+        return bar
 
     # ---- data feeds ----------------------------------------------------------------------
     def _on_loaded(self):
         self.thumb_times, self._thumb_arr, self.wave = None, None, None
         self._thumb_cache = {}
         self.position = self.doc.project.view.position
-        self._corner.setVisible(self.doc.has_video)
-        self._place_corner()
+        self.zoom_bar.setEnabled(self.doc.has_video)
         self._relayout()
 
     def set_thumbnails(self, times: np.ndarray, images: np.ndarray) -> None:
@@ -199,10 +217,11 @@ class Timeline(QWidget):
 
     def set_position(self, t: float, follow: bool = False, margin: int = 20) -> None:
         """follow: scroll when the playhead leaves the view (or comes within `margin` px of its right
-        edge — playback pages ahead; manual seeks pass 0 so a click near the edge does not jump)."""
+        edge — playback pages ahead; manual seeks pass 0 so a click near the edge does not jump).
+        While the mouse drags on the timeline the view is the mouse's: it glides at the edges instead."""
         old_x = self.t2x(self.position)
         self.position = t
-        if follow and self.doc.has_video:
+        if follow and self.doc.has_video and self._drag is None:
             x = self.t2x(t)
             if x < 0 or x > self.width() - margin:
                 pps = self.pps
@@ -211,15 +230,17 @@ class Timeline(QWidget):
         self._update_playhead(old_x, self.t2x(t))
 
     def _update_playhead(self, old_x: float, new_x: float) -> None:
-        """Repaint only what a playhead move changes: the old and new playhead strips and the clip
-        that is still open (its right edge and "…" tag follow the playhead)."""
+        """Repaint only what a playhead move changes: the old and new playhead strips, the clip
+        that is still open (its right edge and "…" tag follow the playhead) and the clip whose edge
+        is being changed."""
         lo, hi = min(old_x, new_x) - 8, max(old_x, new_x) + 8
         self.update(int(lo), 0, int(hi - lo) + 1, self.height())
-        c = self.doc.open_clip()
-        if c is not None:
-            r = self._clip_rect(c)
-            right = max(r.right(), old_x, new_x) + 4
-            self.update(QRectF(r.left() - 4, r.top() - 3, right - r.left() + 8, r.height() + 6).toAlignedRect())
+        edit = self.doc.edge_edit
+        for c in (self.doc.open_clip(), self.doc.project.clip_by_id(edit[0]) if edit else None):
+            if c is not None:
+                r = self._clip_rect(c)
+                left, right = min(r.left(), old_x, new_x) - 4, max(r.right(), old_x, new_x) + 4
+                self.update(QRectF(left, r.top() - 3, right - left, r.height() + 6).toAlignedRect())
 
     # ---- view mapping --------------------------------------------------------------------
     @property
@@ -348,12 +369,26 @@ class Timeline(QWidget):
         th, wh = self._rows()
         return RULER_H + th + wh + 6
 
+    def _edited_edge(self, c) -> str | None:
+        """"in" / "out" when that edge of clip c follows the playhead until I / O is pressed."""
+        edit = self.doc.edge_edit
+        return edit[1] if edit is not None and edit[0] == c.id and c.out_frame is not None else None
+
     def _clip_rect(self, c) -> QRectF:
         x0 = self.t2x(self.doc.time_of(c.in_frame))
         if c.out_frame is None:
             x1 = max(x0 + 2, self.t2x(self.position))
         else:
             x1 = self.t2x(self.doc.time_of(c.out_frame))
+            edge = self._edited_edge(c)
+            if edge is not None:
+                # exactly what I / O would set: In = the playhead frame, Out = just after it
+                f = self.doc.frame_at(self.position)
+                if edge == "in":
+                    x0 = self.t2x(self.doc.time_of(f))
+                else:
+                    x1 = self.t2x(self.doc.time_of(min(f + 1, self.doc.frame_count)))
+                x0, x1 = min(x0, x1), max(x0, x1)
         lane = self._lanes.get(c.id, 0)
         pitch, height = self._lane_geom()
         y = self._clips_y + lane * pitch
@@ -467,15 +502,23 @@ class Timeline(QWidget):
             p.drawText(QRectF(0, y, self.width(), th), Qt.AlignmentFlag.AlignCenter,
                        tr("generating thumbnails…") if self.doc.has_video else "")
             return
+        # Tiles sit on a grid fixed in *time* (one tile per tw px at this zoom), so scrolling slides
+        # them along with the ruler and waveform; a grid fixed on screen re-picked every tile's picture
+        # on each scroll step and the whole row flickered.
         tw = self._thumb(0, th).deviceIndependentSize().width()
-        x = 0.0
+        origin = self.scroll * self.pps            # content px of the view's left edge
+        k = math.floor(origin / tw)
         times = self.thumb_times
         last = len(self._thumb_arr) - 1
-        while x < self.width():
-            t = self.x2t(x + tw / 2)
+        dpr = self.devicePixelRatioF()
+        while True:
+            x = k * tw - origin
+            if x >= self.width():
+                break
+            t = (k + 0.5) * tw / self.pps          # tile centre
             i = int(np.searchsorted(times, t, side="right")) - 1
-            p.drawImage(QPointF(x, y), self._thumb(max(0, min(i, last)), th))
-            x += tw
+            p.drawImage(QPointF(round(x * dpr) / dpr, y), self._thumb(max(0, min(i, last)), th))
+            k += 1
 
     def wave_envelope(self, x0: float, x1: float, step: float) -> tuple[np.ndarray, np.ndarray]:
         """Peak values (0..255) sampled every `step` logical px between x0 and x1.
@@ -576,11 +619,12 @@ class Timeline(QWidget):
             path.addRoundedRect(r, 3, 3)
             p.fillPath(path, fill)
             pen = QPen(C_OUTLINE if c.id in sel else col.lighter(130), 2 if c.id in sel else 1)
-            if c.out_frame is None:
+            edge = self._edited_edge(c)
+            if c.out_frame is None or edge is not None:
                 pen.setStyle(Qt.PenStyle.DashLine)
             p.setPen(pen)
             p.drawPath(path)
-            self._paint_edge_brackets(p, r, col, c.out_frame is not None)
+            self._paint_edge_brackets(p, r, col, c.out_frame is not None, edge == "out")
             label = c.name + ("  🔇" if c.muted else "") + ("  CC" if c.burn_subs else "")
             if r.width() > 30:
                 p.setPen(C_CLIP_TEXT)
@@ -589,7 +633,8 @@ class Timeline(QWidget):
                            label)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
-    def _paint_edge_brackets(self, p: QPainter, r: QRectF, col: QColor, closed: bool) -> None:
+    def _paint_edge_brackets(self, p: QPainter, r: QRectF, col: QColor, closed: bool,
+                             out_follows: bool = False) -> None:
         """Clear "[" / "]" handles at the clip edges, plus In / Out tags when there is room."""
         solid = QColor(col)
         solid.setAlpha(255)
@@ -610,7 +655,7 @@ class Timeline(QWidget):
             p.setPen(solid.lighter(150) if theme.current().name == "dark" else solid.darker(160))
             flags = Qt.AlignmentFlag.AlignVCenter
             p.drawText(r.adjusted(0, 0, -10, 0), flags | Qt.AlignmentFlag.AlignRight,
-                       tr("Out") if closed else "…")
+                       tr("Out") if closed and not out_follows else "…")
 
     def _paint_markers(self, p: QPainter):
         sel = set(self.doc.selected_markers)
@@ -718,21 +763,29 @@ class Timeline(QWidget):
                 ids = [hit["cid"]]
             self.doc.select_clips(ids)
             self._seek_x(ev.position().x())
-            self._drag = {"kind": "scrub", "moved": False}
+            self._drag = {"kind": "scrub", "moved": False, "x": ev.position().x()}
         elif kind == "marker":
             m = self.doc.project.marker_by_id(hit["mid"])
             self.doc.select_markers([m.id])
-            self._drag = {"kind": "marker", "mid": m.id, "preview": m.frame}
+            self._drag = {"kind": "marker", "mid": m.id, "preview": m.frame, "x": ev.position().x()}
         else:
             if not ctrl:
                 self.doc.clear_selection()
             self._seek_x(ev.position().x())
-            self._drag = {"kind": "scrub", "moved": False}
+            self._drag = {"kind": "scrub", "moved": False, "x": ev.position().x()}
+        self._moves.clear()
         self.update()
 
     def _x_time(self, x: float) -> float:
+        """Time of the frame under x, kept inside the view (at high zoom the nearest frame of an edge
+        pixel can lie just outside it, and following the playhead would then page the view)."""
         idx = self.doc.index
-        return idx.time_of(idx.nearest_frame(self.x2t(max(0.0, x))))
+        f = idx.nearest_frame(self.x2t(max(0.0, x)))
+        if f > 0 and self.t2x(idx.time_of(f)) > self.width():
+            f -= 1
+        if f < self.doc.frame_count - 1 and self.t2x(idx.time_of(f)) < 0:
+            f += 1
+        return idx.time_of(f)
 
     def _seek_x(self, x: float):
         t = self._x_time(x)
@@ -743,14 +796,31 @@ class Timeline(QWidget):
         pos = ev.position()
         if not self.doc.has_video:
             return
-        no_snap = bool(ev.modifiers() & Qt.KeyboardModifier.AltModifier)
         d = self._drag
         if d is None:
             self._update_hover(pos)
             return
+        self._drag_pos = pos
+        self._drag_alt = bool(ev.modifiers() & Qt.KeyboardModifier.AltModifier)
+        now = time.monotonic()
+        self._moves.append((now, pos.x()))
+        while len(self._moves) > 2 and now - self._moves[0][0] > EDGE_VELOCITY_S:
+            self._moves.popleft()
+        if abs(pos.x() - d["x"]) >= CLICK_PX:
+            d["armed"] = True     # a click (or a press held still) near the edge never scrolls
+        self._apply_drag()
+        if self._edge_target(now) and not self._edge_timer.isActive():
+            self._edge_last = now
+            self._edge_timer.start()
+
+    def _apply_drag(self) -> None:
+        """Move whatever is dragged to the mouse (again after the view glided under a resting mouse)."""
+        d = self._drag
+        pos, no_snap = self._drag_pos, self._drag_alt
         kind = d["kind"]
+        x = max(0.0, min(pos.x(), float(self.width())))   # the dragged thing stays in view
         if kind == "scrub":
-            t = self._x_time(pos.x())
+            t = self._x_time(x)
             if t != self.position:
                 d["moved"] = True
                 self.set_position(t)
@@ -764,7 +834,7 @@ class Timeline(QWidget):
                 return   # still a click: don't nudge the edge by a frame
             d["moved"] = True
             c = self.doc.project.clip_by_id(d["cid"])
-            f = self._snap_frame(pos.x(), exclude_cid=c.id, no_snap=no_snap)
+            f = self._snap_frame(x, exclude_cid=c.id, no_snap=no_snap)
             pin, pout = d["preview"]
             if kind == "clip_in":
                 limit = (pout - 1) if pout is not None else self.doc.frame_count - 1
@@ -776,17 +846,71 @@ class Timeline(QWidget):
                            f"{fmt_time(self.doc.time_of(pout)) if pout is not None else '…'}")
             self.update()
         elif kind == "marker":
-            d["preview"] = self._snap_frame(pos.x(), exclude_mid=d["mid"], no_snap=no_snap)
+            d["preview"] = self._snap_frame(x, exclude_mid=d["mid"], no_snap=no_snap)
             self.update()
+
+    # ---- edge scrolling while dragging ---------------------------------------------------
+    def _mouse_speed(self, now: float) -> float:
+        """Recent horizontal mouse speed (px/s); 0 once the mouse rests."""
+        if len(self._moves) < 2 or now - self._moves[-1][0] > EDGE_VELOCITY_S * 0.75:
+            return 0.0
+        (t0, x0), (t1, x1) = self._moves[0], self._moves[-1]
+        return (x1 - x0) / (t1 - t0) if t1 - t0 > 0.005 else 0.0
+
+    def _edge_target(self, now: float) -> float:
+        """Speed (view px/s, signed) the view should glide at for the current drag position."""
+        d = self._drag
+        if (d is None or d["kind"] == "pan" or not d.get("armed")
+                or self.doc.project.view.pps <= 0 or not self.doc.has_video):
+            return 0.0
+        x, w = self._drag_pos.x(), self.width()
+        zone = max(8.0, min(EDGE_ZONE_PX, w / 6))
+        if x < zone:
+            sign, depth = -1.0, (zone - x) / zone
+        elif x > w - zone:
+            sign, depth = 1.0, (x - (w - zone)) / zone
+        else:
+            return 0.0
+        scroll, pps = self.scroll, self.pps
+        if (sign < 0 and scroll <= 0) or (sign > 0 and scroll >= self._clamp_scroll(math.inf, pps)):
+            return 0.0   # already at that end
+        toward = sign * self._mouse_speed(now)
+        if toward < -EDGE_AWAY_PX_S:
+            return 0.0   # heading back from the edge: the user has found the place
+        depth = min(depth, EDGE_MAX_DEPTH)
+        return sign * max(EDGE_SPEED * depth * depth, toward * EDGE_FOLLOW)
+
+    def _edge_tick(self) -> None:
+        now = time.monotonic()
+        dt = min(0.05, max(0.0, now - self._edge_last))
+        self._edge_last = now
+        target = self._edge_target(now)
+        if target == 0.0:
+            self._stop_edge_scroll()
+            return
+        if self._edge_speed * target < 0:
+            self._edge_speed = 0.0
+        rate = EDGE_RAMP_UP if abs(target) > abs(self._edge_speed) else EDGE_RAMP_DOWN
+        self._edge_speed += (target - self._edge_speed) * min(1.0, rate * dt)
+        pps = self.pps
+        new = self._clamp_scroll(self.scroll + self._edge_speed * dt / pps, pps)
+        if new != self.scroll:
+            self.doc._set_view(self.doc.project.view.pps, new)
+            self._apply_drag()
+
+    def _stop_edge_scroll(self) -> None:
+        self._edge_timer.stop()
+        self._edge_speed = 0.0
 
     def mouseReleaseEvent(self, ev):
         d = self._drag
         self._drag = None
+        self._stop_edge_scroll()
+        self._moves.clear()
         if d is None:
             return
         if d["kind"] == "scrub":
-            if d["moved"]:
-                self.scrub_finished.emit(self.position)
+            self.scrub_finished.emit(self.position)
             return
         if d["kind"] in ("clip_in", "clip_out"):
             pin, pout = d["preview"]
@@ -832,7 +956,8 @@ class Timeline(QWidget):
         k = hit["kind"]
         if k in ("clip_in", "clip_out"):
             self.setCursor(Qt.CursorShape.SizeHorCursor)
-            self.hint.emit(tr("Click — go to this clip edge · drag — move it · Alt — no snapping"))
+            self.hint.emit(tr("Click — go to this clip edge · drag — move it · Alt — no snapping · "
+                              "right click — change it with the playhead"))
         elif k == "marker":
             self.setCursor(Qt.CursorShape.SizeHorCursor)
             self.hint.emit(tr("Drag to move the marker · Del — delete"))
@@ -860,7 +985,6 @@ class Timeline(QWidget):
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        self._place_corner()
         self.update()
 
     def contextMenuEvent(self, ev):
@@ -876,12 +1000,20 @@ class Timeline(QWidget):
             a.triggered.connect(lambda: self.context_action.emit(action, t))
             menu.addAction(a)
 
+        if self.doc.edge_edit is not None:
+            add(tr("Cancel changing the clip edge"), "cancel_edge_edit")
+            menu.addSeparator()
         add(tr("Add marker here"), "marker")
         add(tr("Set In here (new clip)"), "set_in")
         add(tr("Set Out here"), "set_out")
         if hit["kind"] in ("clip", "clip_in", "clip_out"):
             self.doc.select_clips([hit["cid"]])
             menu.addSeparator()
+            if self.doc.project.clip_by_id(hit["cid"]).out_frame is not None:
+                if hit["kind"] != "clip_out":
+                    add(tr("Change clip start (follows the playhead, I sets it)"), "edit_in")
+                if hit["kind"] != "clip_in":
+                    add(tr("Change clip end (follows the playhead, O sets it)"), "edit_out")
             add(tr("Zoom to clip"), "zoom_clip")
             add(tr("Delete clip"), "delete")
         elif hit["kind"] == "marker":

@@ -16,6 +16,7 @@ SEEK_EPS = 0.0005  # seek slightly before the frame pts so float rounding never 
 REASON_SUBS = "subs"
 REASON_CROP = "crop"
 REASON_SCALE = "scale"
+REASON_SHORTS = "shorts"   # the crop is the clip's Shorts frame (Shorts Mode)
 
 
 @dataclass

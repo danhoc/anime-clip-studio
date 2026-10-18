@@ -8,11 +8,12 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor
-from PySide6.QtWidgets import (QHBoxLayout, QHeaderView, QProgressBar, QPushButton, QTreeWidget, QTreeWidgetItem,
+from PySide6.QtWidgets import (QHeaderView, QProgressBar, QPushButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
 from acs.core.jobs import CANCELLED, DONE, FAILED, JobQueue
 from acs.i18n import tr
+from acs.ui.flow_layout import FlowLayout
 from acs.ui.texts import status_text, warning_text
 
 
@@ -34,7 +35,10 @@ class QueuePanel(QWidget):
         self.tree.setRootIsDecorated(False)
         self.tree.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         lay.addWidget(self.tree, 1)
-        row = QHBoxLayout()
+        # the buttons wrap onto a second row instead of widening the side panel (long Russian labels)
+        buttons = QWidget()
+        row = FlowLayout(buttons, spacing=6)
+        row.setContentsMargins(0, 0, 0, 0)
         self.b_cancel = QPushButton(tr("Cancel"))
         self.b_cancel.setToolTip(tr("Stop the selected job"))
         b_cancel_all = QPushButton(tr("Cancel all"))
@@ -43,11 +47,9 @@ class QueuePanel(QWidget):
         b_clear = QPushButton(tr("Clear finished"))
         self.b_open = QPushButton(tr("Open folder"))
         self.b_open.setToolTip(tr("Show the output of the selected job in Explorer"))
-        for b in (self.b_cancel, b_cancel_all, self.b_retry, b_clear):
-            row.addWidget(b)
-        row.addStretch(1)
-        row.addWidget(self.b_open)
-        lay.addLayout(row)
+        for b in (self.b_cancel, b_cancel_all, self.b_retry, b_clear, self.b_open):
+            row.addWidget(b)   # the last one (Open folder) stays right-aligned
+        lay.addWidget(buttons)
         self.b_cancel.clicked.connect(self._cancel)
         b_cancel_all.clicked.connect(queue.cancel_all)
         self.b_retry.clicked.connect(self._retry)

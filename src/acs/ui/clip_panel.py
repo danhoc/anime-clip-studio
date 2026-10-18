@@ -8,10 +8,11 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QSpinBox,
                                QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from acs.core.clipinfo import effective_audio, summarize
+from acs.core.clipinfo import effective_audio, effective_crop, summarize
+from acs.core import framing
 from acs.core.document import ProjectDocument
-from acs.core.model import CropRect
-from acs.core.ffmpeg_cmd import available_heights
+from acs.core.model import CropRect, ShortsFrame
+from acs.core.ffmpeg_cmd import available_heights, scaled_width
 from acs.core.presets import PresetStore
 from acs.core.util import fmt_duration, fmt_time
 from acs.ui import theme
@@ -65,6 +66,7 @@ class ClipPanel(QWidget):
             combo.setMinimumContentsLength(8)
         self.defaults_box = QGroupBox(tr("Project"))
         dform = QFormLayout(self.defaults_box)
+        dform.setVerticalSpacing(4)
         preset_row = QHBoxLayout()
         preset_row.addWidget(self.def_preset, 1)
         preset_row.addWidget(edit_presets)
@@ -103,6 +105,7 @@ class ClipPanel(QWidget):
         # ---- properties ----
         self.props = QGroupBox(tr("Selected clip"))
         form = QFormLayout(self.props)
+        form.setVerticalSpacing(4)   # the whole column fits next to the player on 1080 px screens
         self.mute = QCheckBox(tr("Mute audio"))
         self.mute.setToolTip(tr("Export this clip without any audio track"))
         self.audio = QComboBox()
@@ -111,6 +114,14 @@ class ClipPanel(QWidget):
         self.burn.setToolTip(tr("Render the subtitles into the picture (requires re-encoding)"))
         self.sub = QComboBox()
         self.sub.setToolTip(tr("Subtitle track to burn in"))
+        self.sub_size = QSpinBox()
+        self.sub_size.setRange(25, 400)
+        self.sub_size.setSingleStep(10)
+        self.sub_size.setSuffix(" %")
+        self.sub_size.setValue(100)   # shown while no clip is selected
+        self.sub_size.setToolTip(tr("Size of the burned-in dialogue (signs placed in the picture keep their size). "
+                                    "In Shorts Mode the subtitles are also scaled to the frame and placed at its "
+                                    "bottom automatically."))
         self.crop_mode = QComboBox()
         for key, label in (("none", "No crop"), ("auto", "Auto (detect black bars)"), ("manual", "Manual")):
             self.crop_mode.addItem(tr(label), key)
@@ -123,8 +134,22 @@ class ClipPanel(QWidget):
         crop_row.addWidget(self.crop_mode, 1)
         crop_row.addWidget(self.detect)
         crop_row.addWidget(self.crop_preview)
+        self.crop_aspect = QComboBox()
+        names = {"free": tr("Free"), "source": tr("Original")}
+        for key in framing.CROP_ASPECTS:
+            self.crop_aspect.addItem(names.get(key, key), key)
+        self.crop_aspect.setToolTip(tr("Aspect ratio of the manual crop. Over the video: drag the frame to move it, "
+                                       "drag a corner or an edge to resize it, double-click it to reset it "
+                                       "(Preview off)."))
+        self.shorts_size = QLabel()
+        self.shorts_size.setToolTip(tr("Size of the exported picture"))
+        self.shorts_reset = QPushButton(tr("Reset frame"))
+        self.shorts_reset.setToolTip(tr("Full height, in the centre of the picture"))
+        self.shorts_row = QHBoxLayout()
+        self.shorts_row.addWidget(self.shorts_size, 1)
+        self.shorts_row.addWidget(self.shorts_reset)
         self.crop_spins = []
-        spin_row = QHBoxLayout()
+        spin_row = self.spin_row = QHBoxLayout()
         for name in ("x", "y", "w", "h"):
             sp = QSpinBox()
             sp.setRange(0, 8192)
@@ -139,6 +164,7 @@ class ClipPanel(QWidget):
         self.custom_h.setRange(64, 4320)
         self.custom_h.setSingleStep(2)
         self.custom_h.setToolTip(tr("Custom height (must be below the source height)"))
+        self.custom_h.setVisible(False)   # only for the "Custom…" resolution
         h_row = QHBoxLayout()
         h_row.addWidget(self.res_combo, 1)
         h_row.addWidget(self.custom_h)
@@ -151,8 +177,12 @@ class ClipPanel(QWidget):
         form.addRow(tr("Audio track"), self.audio)
         form.addRow(self.burn)
         form.addRow(tr("Subtitle track"), self.sub)
+        form.addRow(tr("Subtitle size"), self.sub_size)
+        form.addRow(tr("Shorts frame"), self.shorts_row)
         form.addRow(tr("Crop"), crop_row)
+        form.addRow(tr("Aspect ratio"), self.crop_aspect)
         form.addRow("", spin_row)
+        self._form = form
         form.addRow(tr("Resolution"), h_row)
         form.addRow(tr("Preset"), self.preset)
         form.addRow(self.info)
@@ -186,7 +216,11 @@ class ClipPanel(QWidget):
         self.burn.toggled.connect(lambda v: self._apply({"burn_subs": v}, tr("Burn subtitles")))
         self.sub.currentIndexChanged.connect(lambda: self._apply({"sub_track": self.sub.currentData()},
                                                                  tr("Subtitle track")))
+        self.sub_size.editingFinished.connect(lambda: self._apply({"sub_size": self.sub_size.value()},
+                                                                  tr("Subtitle size")))
+        self.shorts_reset.clicked.connect(lambda: self._apply({"shorts": ShortsFrame()}, tr("Reset Shorts frame")))
         self.crop_mode.currentIndexChanged.connect(self._crop_mode_changed)
+        self.crop_aspect.currentIndexChanged.connect(self._crop_aspect_changed)
         self.detect.clicked.connect(lambda: self.detect_crop_requested.emit(list(self.doc.selected_clips)))
         self.crop_preview.toggled.connect(lambda _v: self._emit_preview())
         for sp in self.crop_spins:
@@ -269,9 +303,11 @@ class ClipPanel(QWidget):
             s = summarize(p, self.presets, info, c, self.settings)
             a = effective_audio(p, info, c)
             audio = tr("muted") if c.muted else (f"#{a + 1}" if a is not None else "—")
-            subs = "CC" if c.burn_subs else ""
+            subs = ("CC" if c.sub_size == 100 else f"CC {c.sub_size}%") if c.burn_subs else ""
             size = f"{s.height}p" if s.height else tr("source")
-            if c.crop_mode != "none":
+            if self.settings.shorts_mode:
+                size += " 9:16"
+            elif c.crop_mode != "none":
                 size += " ✂"
             mode = mode_text(s.mode)
             tip = ""
@@ -361,7 +397,14 @@ class ClipPanel(QWidget):
         return [c for c in (self.doc.project.clip_by_id(i) for i in self.doc.selected_clips) if c is not None]
 
     def _load_props(self) -> None:
+        shorts = self.settings.shorts_mode
+        self._form.setRowVisible(self.shorts_row, shorts)
         clips = self._selected()
+        # The ratio and the rectangle only take room while a crop is on (fits 1080 px screens without
+        # scrolling); auto mode shows the detected rectangle, only manual mode has a ratio.
+        mode = clips[0].crop_mode if clips and not shorts else "none"
+        self._form.setRowVisible(self.crop_aspect, mode == "manual")
+        self._form.setRowVisible(self.spin_row, mode != "none")
         self.props.setEnabled(bool(clips))
         self.props.setTitle(tr("Selected clip") if len(clips) <= 1 else
                             tr("Selected clips") + f" ({len(clips)})")
@@ -379,14 +422,24 @@ class ClipPanel(QWidget):
             w.blockSignals(False)
         _combo_set(self.audio, c.audio_track)
         _combo_set(self.sub, c.sub_track)
+        self.sub_size.blockSignals(True)
+        self.sub_size.setValue(c.sub_size)
+        self.sub_size.blockSignals(False)
         _combo_set(self.crop_mode, c.crop_mode)
         rect = c.crop or CropRect()
         for sp, v in zip(self.crop_spins, (rect.x, rect.y, rect.w, rect.h)):
             sp.blockSignals(True)
             sp.setValue(v)
-            sp.setEnabled(c.crop_mode == "manual")
+            sp.setEnabled(c.crop_mode == "manual" and not shorts)
             sp.blockSignals(False)
-        self.detect.setEnabled(c.crop_mode != "none")
+        # Shorts Mode: the Shorts frame decides the picture, the crop tool is off (crops are kept)
+        self.crop_mode.setEnabled(not shorts)
+        self.crop_mode.setToolTip(tr("Not available in Shorts Mode: the Shorts frame sets the exported picture.")
+                                  if shorts else tr("Remove black bars. Cropping requires re-encoding."))
+        self.crop_preview.setEnabled(not shorts)
+        _combo_set(self.crop_aspect, c.crop_aspect)
+        self.crop_aspect.setEnabled(c.crop_mode == "manual" and not shorts)
+        self.detect.setEnabled(c.crop_mode != "none" and not shorts)
         if c.target_height is None or c.target_height == 0 or self.res_combo.findData(c.target_height) >= 0:
             _combo_set(self.res_combo, c.target_height)
             self.custom_h.setVisible(False)
@@ -399,8 +452,15 @@ class ClipPanel(QWidget):
         _combo_set(self.preset, c.preset_id)
         self.audio.setEnabled(not c.muted)
         self.sub.setEnabled(c.burn_subs)
+        self.sub_size.setEnabled(c.burn_subs)
         self._updating = False
         s = summarize(self.doc.project, self.presets, self.doc.info, c, self.settings)
+        frame = effective_crop(c, self.doc.info, True) if shorts else None
+        if frame is not None:
+            w, h = frame.w, frame.h
+            if s.height:
+                w, h = scaled_width(s.height, w, h), s.height
+            self.shorts_size.setText(f"{w}×{h}")
         lines = [f"{tr('Mode')}: {mode_text(s.mode)}"]
         if s.reasons:
             lines.append("ⓘ " + tr("Re-encoded because of: ") + ", ".join(reason_text(r) for r in s.reasons))
@@ -434,11 +494,48 @@ class ClipPanel(QWidget):
         if self._updating:
             return
         x, y, w, h = (sp.value() // 2 * 2 for sp in self.crop_spins)
+        clips = self._selected()
         if self.doc.info and self.doc.info.video:
             v = self.doc.info.video
+            dar = framing.display_aspect(v.width, v.height, v.sar)
+            aspect = framing.parse_aspect(clips[0].crop_aspect, dar) if clips else None
+            old = clips[0].crop if clips else None
+            if aspect and old is not None and old.is_valid():
+                # a locked ratio: the other side follows the one that was typed in
+                sar = framing.parse_sar(v.sar)
+                if h != old.h and w == old.w:
+                    w = h * aspect / sar
+                else:
+                    h = w * sar / aspect
+                r = framing.clamp_rect((x / v.width, y / v.height, w / v.width, h / v.height), dar, aspect)
+                self._apply({"crop": framing.to_crop(r, v.width, v.height, v.sar, aspect), "crop_mode": "manual"},
+                            tr("Crop"))
+                return
             w = min(w, v.width - x)
             h = min(h, v.height - y)
         self._apply({"crop": CropRect(x, y, w, h), "crop_mode": "manual"}, tr("Crop"))
+
+    def _crop_aspect_changed(self) -> None:
+        """A new ratio: each selected clip's crop becomes the largest rectangle with it inside the old one."""
+        if self._updating or not (self.doc.info and self.doc.info.video):
+            return
+        key = self.crop_aspect.currentData()
+        v = self.doc.info.video
+        dar = framing.display_aspect(v.width, v.height, v.sar)
+        aspect = framing.parse_aspect(key, dar)
+        clips = self._selected()
+        self.doc.undo.beginMacro(tr("Crop aspect ratio"))
+        try:
+            for c in clips:
+                fields = {"crop_aspect": key}
+                if aspect:
+                    r = (framing.from_crop(c.crop, v.width, v.height) if c.crop and c.crop.is_valid()
+                         else (0.0, 0.0, 1.0, 1.0))
+                    fields["crop"] = framing.to_crop(framing.fit_aspect_inside(r, aspect, dar), v.width, v.height,
+                                                     v.sar, aspect)
+                self.doc.set_clip_fields(c.id, fields, tr("Crop aspect ratio"))
+        finally:
+            self.doc.undo.endMacro()
 
     def _height_changed(self) -> None:
         if self._updating:
@@ -454,7 +551,7 @@ class ClipPanel(QWidget):
 
     def _emit_preview(self) -> None:
         clips = self._selected()
-        if self.crop_preview.isChecked() and clips and clips[0].crop_mode != "none" and clips[0].crop \
+        if not self.settings.shorts_mode and self.crop_preview.isChecked() and clips and clips[0].crop_mode != "none" and clips[0].crop \
                 and clips[0].crop.is_valid():
             self.preview_crop.emit(clips[0].crop)
         else:

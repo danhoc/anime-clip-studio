@@ -171,3 +171,29 @@ def test_marker_colours_cycle_and_are_editable(qapp):
     # the counter is persisted, so a reopened project continues the cycle
     q = Project.from_dict(doc.project.to_dict())
     assert q.take_marker_color() == MARKER_COLORS[2]
+
+
+def test_edge_edit_follows_playhead_until_i_or_o(qapp):
+    from acs.core.document import ProjectDocument
+    doc = ProjectDocument()
+    doc.load(Project(), None, FrameIndex.cfr(Fraction(24000, 1001), 100), None)
+    cid, oid = doc.add_clip(100, 200).id, doc.add_clip(300, None).id   # the open clip must not steal it
+    clip = doc.project.clip_by_id
+    assert doc.start_edge_edit(cid, "in") and doc.selected_clips == [cid]
+    assert doc.set_in(250) is None and doc.edge_edit == (cid, "in")   # In must stay before Out
+    assert doc.set_in(120) is clip(cid) and doc.edge_edit is None
+    assert (clip(cid).in_frame, clip(oid).in_frame) == (120, 300)
+    doc.undo.undo()
+    assert clip(cid).in_frame == 100
+    doc.start_edge_edit(cid, "out")
+    assert doc.set_out(50) is None and doc.edge_edit == (cid, "out")
+    assert doc.set_out(179) is clip(cid) and clip(cid).out_frame == 180 and clip(oid).out_frame is None
+    # the other edge's key ends the edit and works as usual
+    doc.start_edge_edit(cid, "out")
+    doc.set_in(310)
+    assert doc.edge_edit is None and clip(oid).in_frame == 310 and clip(cid).in_frame == 100
+    # deleting the clip ends the edit; open clips cannot be edited this way
+    doc.start_edge_edit(cid, "in")
+    doc.delete_items([], [cid])
+    assert doc.edge_edit is None
+    assert not doc.start_edge_edit(oid, "in")

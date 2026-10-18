@@ -25,6 +25,11 @@ def _tri(x0: float, y0: float, x1: float, y1: float, right: bool = True) -> QPol
     return QPolygonF([QPointF(x1, y0), QPointF(x0, mid), QPointF(x1, y1)])
 
 
+def _speaker() -> QPolygonF:
+    return QPolygonF([QPointF(8, 24), QPointF(20, 24), QPointF(34, 12), QPointF(34, 52),
+                      QPointF(20, 40), QPointF(8, 40)])
+
+
 def _paint(kind: str, p: QPainter, c: QColor) -> None:
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(c)
@@ -48,12 +53,16 @@ def _paint(kind: str, p: QPainter, c: QColor) -> None:
         p.drawPolygon(_tri(12, 16, 34, 48, right=False))
         p.drawPolygon(_tri(34, 16, 56, 48, right=False))
     elif kind == "volume":
-        p.drawPolygon(QPolygonF([QPointF(8, 24), QPointF(20, 24), QPointF(34, 12), QPointF(34, 52),
-                                 QPointF(20, 40), QPointF(8, 40)]))
+        p.drawPolygon(_speaker())
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(_pen(c, 4))
         p.drawArc(QRectF(30, 20, 14, 24), -60 * 16, 120 * 16)
         p.drawArc(QRectF(30, 12, 24, 40), -60 * 16, 120 * 16)
+    elif kind == "muted":
+        p.drawPolygon(_speaker())
+        p.setPen(_pen(c, 5))
+        p.drawLine(QPointF(40, 22), QPointF(56, 42))
+        p.drawLine(QPointF(56, 22), QPointF(40, 42))
     elif kind == "subtitles":
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(c, 4))
@@ -83,6 +92,32 @@ def _paint(kind: str, p: QPainter, c: QColor) -> None:
         p.drawEllipse(QPointF(22, 25), 5, 5)
         p.drawPolygon(QPolygonF([QPointF(12, 48), QPointF(28, 32), QPointF(36, 40), QPointF(44, 30),
                                  QPointF(52, 48)]))
+    elif kind in ("zoom_in", "zoom_out"):
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(_pen(c, 5))
+        p.drawEllipse(QPointF(27, 27), 17, 17)
+        p.setPen(_pen(c, 8))
+        p.drawLine(QPointF(40, 40), QPointF(54, 54))
+        p.setPen(_pen(c, 5))
+        p.drawLine(QPointF(19, 27), QPointF(35, 27))
+        if kind == "zoom_in":
+            p.drawLine(QPointF(27, 19), QPointF(27, 35))
+    elif kind == "zoom_fit":       # |<->| : the whole video
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(_pen(c, 5))
+        p.drawLine(QPointF(8, 14), QPointF(8, 50))
+        p.drawLine(QPointF(56, 14), QPointF(56, 50))
+        p.drawLine(QPointF(16, 32), QPointF(48, 32))
+        p.drawPolyline(QPolygonF([QPointF(24, 22), QPointF(15, 32), QPointF(24, 42)]))
+        p.drawPolyline(QPolygonF([QPointF(40, 22), QPointF(49, 32), QPointF(40, 42)]))
+    elif kind == "zoom_clip":      # [■] : the selected clip
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(_pen(c, 5))
+        p.drawPolyline(QPolygonF([QPointF(18, 12), QPointF(8, 12), QPointF(8, 52), QPointF(18, 52)]))
+        p.drawPolyline(QPolygonF([QPointF(46, 12), QPointF(56, 12), QPointF(56, 52), QPointF(46, 52)]))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        p.drawRoundedRect(QRectF(18, 22, 28, 20), 3, 3)
     else:
         raise ValueError(kind)
 

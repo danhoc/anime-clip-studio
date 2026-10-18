@@ -12,6 +12,7 @@ CLIP_COLORS = ["#4f9dff", "#ff7a59", "#5cd17b", "#c77dff", "#ffcc4d", "#3fd0d4",
 # Standard marker palette, assigned round-robin to new markers (user can pick any colour later).
 MARKER_COLORS = ["#f5c542", "#ff6b6b", "#4fd1c5", "#b388ff", "#7bd88f", "#ffa94d", "#74c0fc", "#f783ac"]
 MARKER_COLOR_NAMES = ["Yellow", "Red", "Teal", "Purple", "Green", "Orange", "Blue", "Pink"]
+SHORTS_ASPECT = 9 / 16   # width / height of a YouTube Shorts picture
 
 
 def new_id() -> str:
@@ -36,6 +37,16 @@ class CropRect:
 
 
 @dataclass
+class ShortsFrame:
+    """9:16 frame used in Shorts Mode, relative to the picture: centre and height as fractions.
+    The default is the full height, centred (see core/shorts.py for clamping and pixels)."""
+
+    cx: float = 0.5
+    cy: float = 0.5
+    h: float = 1.0
+
+
+@dataclass
 class Marker:
     frame: int
     time: float
@@ -55,8 +66,11 @@ class Clip:
     audio_track: int | None = None  # relative audio index; None = project default
     burn_subs: bool = False
     sub_track: int | None = None    # relative subtitle index; None = project default
+    sub_size: int = 100             # burned-in dialogue size, percent (Shorts Mode scales on top of it)
     crop_mode: str = "none"         # none | auto | manual
     crop: CropRect | None = None
+    crop_aspect: str = "free"       # manual crop: free | source | "w:h" (see core/framing.py)
+    shorts: ShortsFrame = field(default_factory=ShortsFrame)   # used for export only in Shorts Mode
     target_height: int | None = None  # None = as preset; 0 = force original
     preset_id: str | None = None      # None = project default preset
     color: str = ""
@@ -95,7 +109,7 @@ class Project:
     video: VideoRef = field(default_factory=VideoRef)
     markers: list[Marker] = field(default_factory=list)
     clips: list[Clip] = field(default_factory=list)
-    default_preset_id: str = "orig_smartcut"
+    default_preset_id: str = "x264_crf18"
     default_audio_track: int | None = None
     default_sub_track: int | None = None
     output_dir: str = ""
@@ -145,6 +159,8 @@ class Project:
             c = pick(Clip, c)
             crop = c.get("crop")
             c["crop"] = CropRect(**pick(CropRect, crop)) if isinstance(crop, dict) else None
+            shorts = c.get("shorts")
+            c["shorts"] = ShortsFrame(**pick(ShortsFrame, shorts)) if isinstance(shorts, dict) else ShortsFrame()
             clips.append(Clip(**c))
         return cls(
             video=VideoRef(**pick(VideoRef, d.get("video"))),

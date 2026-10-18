@@ -4,7 +4,8 @@ import os
 from acs.core import recovery
 from acs.core.clipinfo import pick_sub_track
 from acs.core.probe import SubStream
-from acs.core.settings import AppDirs, AppSettings
+from acs.core.model import Project
+from acs.core.settings import DEFAULT_STEPS, AppDirs, AppSettings, parse_step, step_spec
 
 
 def subs(*specs):
@@ -51,3 +52,18 @@ def test_live_lock_detects_other_running_instance():
     data["pid"] = 999999
     recovery.lock_path().write_text(json.dumps(data))
     assert recovery.read_live_lock() is None           # dead pid = crash, not a running instance
+
+def test_new_projects_default_to_h264_crf18():
+    assert Project().default_preset_id == "x264_crf18"
+    assert AppSettings().default_preset_id == "x264_crf18"
+
+
+def test_arrow_steps_default_and_round_trip():
+    s = AppSettings()
+    assert parse_step(s.step_arrow) == ("seconds", 1.0)       # arrows: 1 second
+    assert parse_step(s.step_shift) == ("frames", 1.0)        # Shift+arrows: 1 frame
+    assert parse_step(s.step_ctrl) == ("keyframe", 1.0)
+    for kind, value in (("frames", 24.0), ("seconds", 0.5), ("keyframe", 1.0)):
+        assert parse_step(step_spec(kind, value)) == (kind, value)
+    assert parse_step("garbage", DEFAULT_STEPS["arrow"]) == ("seconds", 1.0)
+    assert parse_step("0f", "1f") == ("frames", 1.0)

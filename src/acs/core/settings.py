@@ -12,6 +12,31 @@ from acs import APP_NAME
 from acs.core.atomic import atomic_write_json, read_json
 
 DEFAULT_VIDEO_EXTS = ["mkv", "mp4", "m4v", "avi", "mov", "webm", "ts", "m2ts", "wmv", "flv"]
+# Arrow-key steps: "<n>f" = n frames, "<x>s" = x seconds, "key" = to the next / previous keyframe.
+DEFAULT_STEPS = {"arrow": "1s", "shift": "1f", "ctrl": "key"}
+
+
+def parse_step(spec: str, default: str = "1f") -> tuple[str, float]:
+    """'24f' -> ('frames', 24), '1.5s' -> ('seconds', 1.5), 'key' -> ('keyframe', 1); bad specs use `default`."""
+    for s in (str(spec).strip().lower(), default):
+        try:
+            if s == "key":
+                return "keyframe", 1.0
+            if s.endswith("f") and int(s[:-1]) >= 1:
+                return "frames", float(int(s[:-1]))
+            if s.endswith("s") and float(s[:-1]) > 0:
+                return "seconds", float(s[:-1])
+        except ValueError:
+            pass
+    return "frames", 1.0
+
+
+def step_spec(kind: str, value: float) -> str:
+    if kind == "keyframe":
+        return "key"
+    if kind == "seconds":
+        return f"{value:g}s"
+    return f"{max(1, round(value))}f"
 
 
 class AppDirs:
@@ -105,7 +130,12 @@ class AppSettings:
     show_tour: bool = True
     name_template: str = "{video}_{clip}_{in}-{out}"
     frames_template: str = "{video}_{time}_{frame}"
-    default_preset_id: str = "orig_smartcut"
+    default_preset_id: str = "x264_crf18"
+    step_arrow: str = DEFAULT_STEPS["arrow"]     # ← / →
+    step_shift: str = DEFAULT_STEPS["shift"]     # Shift + ← / →
+    step_ctrl: str = DEFAULT_STEPS["ctrl"]       # Ctrl + ← / →
+    show_quick_help: bool = True                 # the short help window at every start
+    shorts_mode: bool = False                    # Tools → Shorts Mode: export each clip's 9:16 frame
     window_geometry: str = ""
     window_state: str = ""
     splitter_sizes: dict = field(default_factory=dict)

@@ -71,7 +71,11 @@ def main(argv: list[str] | None = None) -> int:
     mpv_log = str(logs / f"mpv-{trace_path.stem.removeprefix('trace-')}.log") if debug else None
     win = MainWindow(settings, PresetStore(), mpv_log_file=mpv_log)
     holder["win"] = win
-    win.show()
+    # First start (no saved geometry): use the whole screen, the layout is planned for it
+    if settings.window_geometry:
+        win.show()
+    else:
+        win.showMaximized()
 
     def after_show():
         win.startup_checks(stale)

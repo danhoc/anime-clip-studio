@@ -8,6 +8,7 @@ REASONS = {
     "subs": "burned-in subtitles",
     "crop": "crop",
     "scale": "downscale",
+    "shorts": "Shorts frame",
 }
 
 WARNINGS = {

@@ -146,7 +146,10 @@ class ExportDialog(QDialog):
 
     def _update_summary(self) -> None:
         n = sum(1 for it, _, _ in self._rows if it.checkState(0) == Qt.CheckState.Checked)
-        self.summary.setText(tr("Clips to export:") + f" {n}")
+        text = tr("Clips to export:") + f" {n}"
+        if self.settings.shorts_mode:
+            text += "\n" + tr("Shorts Mode is on: only the picture inside each clip's 9:16 frame is exported.")
+        self.summary.setText(text)
 
     def items(self) -> list[ExportItem]:
         out_dir = Path(self.out.text().strip() or self.settings.output_dir)

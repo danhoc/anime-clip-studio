@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QVBoxLayout, QWidget)
 
 from acs.core import uiscale
+from acs.core.settings import DEFAULT_STEPS, parse_step, step_spec
 from acs.core.thumbs import QUALITY_CHOICES as QUALITY_THUMBS
 from acs.core.waveform import QUALITY_CHOICES as QUALITY_WAVE
 from acs.ui import theme
@@ -117,6 +118,15 @@ class SettingsDialog(QDialog):
         f.addRow(tr("Min bits/pixel HEVC/AV1"), self.bpp265)
         self.exts = QLineEdit(", ".join(settings.video_exts))
         f.addRow(tr("Video file extensions"), self.exts)
+        self.steps: dict[str, tuple[QDoubleSpinBox, QComboBox]] = {}
+        for mod, keys in (("arrow", "← / →"), ("shift", "Shift + ← / →"), ("ctrl", "Ctrl + ← / →")):
+            row, spin, unit = self._step_row(getattr(settings, f"step_{mod}"), DEFAULT_STEPS[mod])
+            f.addRow(tr("Step {keys}").format(keys=keys), row)
+            self.steps[mod] = (spin, unit)
+        self.quick_help = QCheckBox(tr("Show the quick help at start"))
+        self.quick_help.setChecked(settings.show_quick_help)
+        self.quick_help.setToolTip(tr("Main keys and tips; also in Help → Quick help"))
+        f.addRow(self.quick_help)
         self.tour = QCheckBox(tr("Show the introduction tour on next start"))
         self.tour.setChecked(settings.show_tour)
         f.addRow(self.tour)
@@ -144,6 +154,41 @@ class SettingsDialog(QDialog):
         lay.addWidget(bb)
 
     @staticmethod
+    def _step_row(spec: str, default: str) -> tuple[QHBoxLayout, QDoubleSpinBox, QComboBox]:
+        """Arrow-key step: a number of frames or seconds, or "to keyframe"."""
+        kind, value = parse_step(spec, default)
+        spin = QDoubleSpinBox()
+        unit = QComboBox()
+        for key, label in (("frames", "frames"), ("seconds", "seconds"), ("keyframe", "to the next keyframe")):
+            unit.addItem(tr(label), key)
+        unit.setToolTip(tr("Frames step exactly; seconds go to the frame nearest that time; "
+                           "keyframe jumps to the next / previous keyframe."))
+
+        def on_unit():
+            k = unit.currentData()
+            spin.setEnabled(k != "keyframe")
+            if k == "frames":
+                spin.setDecimals(0)
+                spin.setRange(1, 10000)
+                spin.setSingleStep(1)
+            else:
+                spin.setDecimals(2)
+                spin.setRange(0.04, 3600)
+                spin.setSingleStep(0.5)
+
+        spin.setDecimals(2)
+        spin.setRange(0, 10000)
+        spin.setFixedWidth(spin.sizeHint().width())   # same width for frames and seconds: rows line up
+        unit.currentIndexChanged.connect(on_unit)
+        unit.setCurrentIndex(max(0, unit.findData(kind)))
+        on_unit()
+        spin.setValue(value)
+        row = QHBoxLayout()
+        row.addWidget(spin)
+        row.addWidget(unit, 1)
+        return row, spin, unit
+
+    @staticmethod
     def _split(text: str) -> list[str]:
         return [x.strip().lstrip(".") for x in text.replace(";", ",").split(",") if x.strip()]
 
@@ -163,6 +208,9 @@ class SettingsDialog(QDialog):
         s.bpp_x264, s.bpp_hevc_av1 = self.bpp264.value(), self.bpp265.value()
         s.video_exts = self._split(self.exts.text()) or s.video_exts
         s.show_tour = self.tour.isChecked()
+        s.show_quick_help = self.quick_help.isChecked()
+        for mod, (spin, unit) in self.steps.items():
+            setattr(s, f"step_{mod}", step_spec(unit.currentData(), spin.value()))
         s.resolved()
         s.save()
         self.accept()
