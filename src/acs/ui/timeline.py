@@ -21,7 +21,7 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QColorDialog, QInputDialog, QMenu, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
-from acs.core import trace
+from acs.core import thumbs, trace
 from acs.core.document import ProjectDocument
 from acs.core.model import MARKER_COLOR_NAMES, MARKER_COLORS
 from acs.core.util import fmt_time
@@ -109,9 +109,10 @@ class Timeline(QWidget):
         self._row_sizes = ROW_SIZES[1][1:]
         self._min_lanes = DEFAULT_LANES
         self.position = 0.0
-        self.thumb_times: np.ndarray | None = None
-        self._thumb_arr: np.ndarray | None = None     # [N, H, W, 3] as decoded
-        self._thumb_cache: dict[int, QImage] = {}     # scaled to the row height, made on first use
+        self.thumb_times: np.ndarray | None = None    # sorted
+        self._thumb_list: list[np.ndarray] = []       # [H, W, 3] each, as decoded, in time order
+        self._thumb_cache: dict[float, QImage] = {}   # by time, scaled to the row height on first use
+        self._thumb_version = 0                       # changes whenever the set changes (background cache)
         self._thumb_key: tuple | None = None
         self.wave: np.ndarray | None = None
         self.wave_bps = DEFAULT_BPS
@@ -170,16 +171,28 @@ class Timeline(QWidget):
 
     # ---- data feeds ----------------------------------------------------------------------
     def _on_loaded(self):
-        self.thumb_times, self._thumb_arr, self.wave = None, None, None
+        self.thumb_times, self._thumb_list, self.wave = None, [], None
         self._thumb_cache = {}
+        self._thumb_version += 1
         self.position = self.doc.project.view.position
         self.zoom_bar.setEnabled(self.doc.has_video)
         self._relayout()
 
-    def set_thumbnails(self, times: np.ndarray, images: np.ndarray) -> None:
-        self.thumb_times = times
-        self._thumb_arr = np.ascontiguousarray(images) if len(images) else None
-        self._thumb_cache = {}
+    def set_thumbnails(self, times: np.ndarray, images) -> None:
+        """Replace the set (the final full pass or a cached one); pictures already scaled are kept."""
+        self.thumb_times = np.asarray(times, dtype=np.float64)
+        self._thumb_list = [np.ascontiguousarray(a) for a in images]
+        keep = set(self.thumb_times.tolist())
+        self._thumb_cache = {t: img for t, img in self._thumb_cache.items() if t in keep}
+        self._thumb_version += 1
+        self.update()
+
+    def add_thumbnails(self, times: np.ndarray, images) -> None:
+        """Merge a batch (the coarse pass, then parts of the full pass) into the shown set."""
+        old_t = self.thumb_times if self.thumb_times is not None else np.empty(0)
+        self.thumb_times, self._thumb_list = thumbs.merge(old_t, self._thumb_list, times,
+                                                          [np.ascontiguousarray(a) for a in images])
+        self._thumb_version += 1
         self.update()
 
     def _thumb(self, i: int, h: int) -> QImage:
@@ -191,9 +204,10 @@ class Timeline(QWidget):
         key = (h, round(dpr, 3))
         if key != self._thumb_key:
             self._thumb_cache, self._thumb_key = {}, key
-        img = self._thumb_cache.get(i)
+        t = float(self.thumb_times[i])
+        img = self._thumb_cache.get(t)
         if img is None:
-            a = self._thumb_arr[i]
+            a = self._thumb_list[i]
             th, tw, _ = a.shape
             src = QImage(a.data, tw, th, tw * 3, QImage.Format.Format_RGB888)
             target = max(1, round(h * dpr))
@@ -201,7 +215,7 @@ class Timeline(QWidget):
             img = (src.copy() if target == th
                    else src.scaledToHeight(target, Qt.TransformationMode.SmoothTransformation))
             img.setDevicePixelRatio(dpr)
-            self._thumb_cache[i] = img
+            self._thumb_cache[t] = img
         return img
 
     def set_waveform(self, peaks: np.ndarray | None, bps: int = DEFAULT_BPS) -> None:
@@ -420,7 +434,7 @@ class Timeline(QWidget):
         """Thumbnails, waveform, ruler, lane stripes and frame grid for the current view (cached)."""
         dpr = self.devicePixelRatioF()
         key = (self.width(), self.height(), round(dpr, 3), self.pps, self.scroll, self._row_sizes,
-               id(self._thumb_arr), id(self.wave), self.wave_ref, id(self.doc.index),
+               self._thumb_version, id(self.wave), self.wave_ref, id(self.doc.index),
                self._lane_count, frozenset(self._lanes.values()))
         if key != self._bg_key or self._bg is None:
             pm = QPixmap(max(1, math.ceil(self.width() * dpr)), max(1, math.ceil(self.height() * dpr)))
@@ -497,7 +511,7 @@ class Timeline(QWidget):
         y = self._thumbs_y
         th = self._rows()[0]
         p.fillRect(0, y, self.width(), th, C_THUMBS_BG)
-        if self.thumb_times is None or self._thumb_arr is None:
+        if self.thumb_times is None or not self._thumb_list:
             p.setPen(C_DIM)
             p.drawText(QRectF(0, y, self.width(), th), Qt.AlignmentFlag.AlignCenter,
                        tr("generating thumbnails…") if self.doc.has_video else "")
@@ -509,7 +523,7 @@ class Timeline(QWidget):
         origin = self.scroll * self.pps            # content px of the view's left edge
         k = math.floor(origin / tw)
         times = self.thumb_times
-        last = len(self._thumb_arr) - 1
+        last = len(self._thumb_list) - 1
         dpr = self.devicePixelRatioF()
         while True:
             x = k * tw - origin

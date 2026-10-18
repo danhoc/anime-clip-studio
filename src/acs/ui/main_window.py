@@ -795,11 +795,10 @@ class MainWindow(QMainWindow):
     # for cancellation and the dispatcher queue — never Qt objects or Qt signals.
     def _start_background(self, token: int, path: str, info, aid) -> None:
         ffprobe, ffmpeg = self.settings.ffprobe, self.settings.ffmpeg
-        hw = self.settings.hwdec
         thumb_h = self.preview_quality()[0]
         cancel = self._load_cancel
         post = self.dispatch.post
-        on_index, on_thumbs = self._on_index, self._on_thumbs
+        on_index, on_thumbs, on_thumbs_part = self._on_index, self._on_thumbs, self._on_thumbs_part
         trace.log("open", f"preview quality: thumbnails {thumb_h}px, waveform {self.preview_quality()[1]}/s "
                           f"(dpr {self._dpr():g})")
 
@@ -815,8 +814,10 @@ class MainWindow(QMainWindow):
             try:
                 from acs.core import thumbs as th
                 v = info.video
+                # a coarse set within a second or two, then the full pass in parts (cached afterwards)
                 res = th.generate(path, v.width, v.height, v.sar, info.start_time, ffmpeg,
-                                  cancel=cancel.is_set, hwaccel=hw, thumb_h=thumb_h)
+                                  cancel=cancel.is_set, thumb_h=thumb_h, duration=info.duration,
+                                  on_batch=lambda t, imgs: post(on_thumbs_part, token, t, imgs))
                 if res is not None and not cancel.is_set():
                     post(on_thumbs, token, res[0], res[1])
             except Exception as e:  # noqa: BLE001
@@ -867,6 +868,10 @@ class MainWindow(QMainWindow):
         trace.log("open", f"thumbnails ready token={token} current={self._token} n={len(times)}")
         if token == self._token:
             self.timeline.set_thumbnails(times, images)
+
+    def _on_thumbs_part(self, token: int, times, images) -> None:
+        if token == self._token:
+            self.timeline.add_thumbnails(times, images)
 
     def _on_wave(self, token: int, bps: int, peaks) -> None:
         if token == self._token:
