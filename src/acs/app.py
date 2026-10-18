@@ -93,13 +93,24 @@ def main(argv: list[str] | None = None) -> int:
     recovery.shutdown_crash_handlers()
     trace.stop()
     if win.restart_requested:
-        relaunch(debug)
+        relaunch(debug, via_launcher=win.restart_via_launcher)
     return rc
 
 
-def relaunch(debug: bool) -> None:
-    """Start a fresh instance (same interpreter, same flags) after this one has released its lock."""
+def relaunch(debug: bool, via_launcher: bool = False) -> None:
+    """Start a fresh instance (same interpreter, same flags) after this one has released its lock.
+
+    After an update it goes through run.bat instead: `uv run` installs changed libraries first. The
+    short wait lets this process exit, so the files of .venv it had loaded can be replaced."""
     import subprocess
+    from acs.core.settings import app_root
+    launcher = app_root() / "run.bat"
+    if via_launcher and launcher.is_file():
+        flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                 | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        subprocess.Popen(f'cmd /c "ping -n 4 127.0.0.1 >nul & "{launcher}""', cwd=str(launcher.parent),
+                         creationflags=flags, close_fds=True)
+        return
     args = [sys.executable, "-m", "acs"] + (["--debug"] if debug else [])
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     subprocess.Popen(args, cwd=str(Path.cwd()), creationflags=flags, close_fds=True)

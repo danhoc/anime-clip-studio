@@ -55,6 +55,7 @@ from acs.ui.settings_dialog import SettingsDialog
 from acs.ui.frame_overlay import FrameOverlay, FrameTarget
 from acs.ui.tools_panel import ToolsDialog
 from acs.ui.timeline import SMALL_SCREEN_H, Timeline
+from acs.ui.update_dialog import Updater
 
 log = logging.getLogger("acs.ui")
 
@@ -128,6 +129,8 @@ class MainWindow(QMainWindow):
         self.presets = presets
         self._mpv_log_file = mpv_log_file
         self.restart_requested = False
+        self.restart_via_launcher = False   # after an update: start again through run.bat (uv syncs libraries)
+        self.updater = Updater(self)
         self.doc = ProjectDocument(self)
         self.dispatch = MainThreadDispatcher(self)
         self.queue = JobQueue(settings, {"export": run_export, "frames": run_frames}, self,
@@ -544,6 +547,8 @@ class MainWindow(QMainWindow):
         self._act(m_help, "", "Quick help", self.show_quick_help)
         self._act(m_help, "help", "Keyboard shortcuts", self.show_shortcuts)
         self._act(m_help, "", "Show introduction tour", self.show_tour)
+        m_help.addSeparator()
+        self._act(m_help, "", "Check for updates…", self.updater.check)
         self._act(m_help, "", "About", self._about)
 
     def _wire(self) -> None:

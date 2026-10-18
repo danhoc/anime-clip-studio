@@ -110,6 +110,8 @@ class QuickHelpDialog(QDialog):
                "(with “{preview}” off). The size of burned-in subtitles is set per clip.").format(
                 crop=tr("Crop"), preview=tr("Preview")),
             tr("ffmpeg / mpv paths: {tools}.").format(tools=_menu_path("&Tools", "External tools…")),
+            tr("Updates: {menu} looks for a newer version on GitHub and installs it only after you agree.")
+            .format(menu=_menu_path("&Help", "Check for updates…")),
         ]
         items = "".join(f"<li style='margin-bottom:4px'>{html.escape(n)}</li>" for n in notes)
         body = QLabel(f"<b>{html.escape(tr('Main keys'))}</b><table style='margin:4px 0 10px 0'>{cells}</table>"
