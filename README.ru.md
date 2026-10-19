@@ -9,7 +9,7 @@ Windows 10 / 11 · интерфейс на русском и английско�
 
 > **Дисклеймер.** Приложение создано с помощью [Claude](https://claude.ai) — ИИ-ассистента компании Anthropic.
 > У автора нет опыта в разработке программного обеспечения. Программа распространяется «как есть», без каких-либо
-> гарантий (см. [лицензию](LICENSE)); о проблемах пишите в [Issues](https://github.com/USERNAME/anime-clip-studio/issues).
+> гарантий (см. [лицензию](LICENSE)); о проблемах пишите в [Issues](https://github.com/danhoc/anime-clip-studio/issues).
 
 **[English version →](README.md)**
 
@@ -189,7 +189,7 @@ Windows 10 / 11 · интерфейс на русском и английско�
 *Справка → Проверить обновления…* спрашивает у GitHub, есть ли новая версия, и показывает, что в ней нового. Ничего не
 скачивается, пока вы не нажмёте **Скачать и установить**:
 
-- копия, скачанная архивом ZIP, сравнивается с последним [выпуском](https://github.com/USERNAME/anime-clip-studio/releases);
+- копия, скачанная архивом ZIP, сравнивается с последним [выпуском](https://github.com/danhoc/anime-clip-studio/releases);
   обновление скачивает его, проверяет архив и заменяет файлы программы — `.venv`, `vendor` (FFmpeg, libmpv), ваши
   проекты, пресеты и настройки остаются как есть;
 - копия, установленная через Git, показывает новые коммиты своей ветки и обновляется командой `git pull --ff-only`
@@ -238,7 +238,7 @@ Program Files, `C:\FFmpeg` и `C:\mpv` (*Инструменты → Внешни
 
 ### Простая установка (скачать)
 
-1. Скачайте программу: **[Releases](https://github.com/USERNAME/anime-clip-studio/releases)** → *Source code (zip)*
+1. Скачайте программу: **[Releases](https://github.com/danhoc/anime-clip-studio/releases)** → *Source code (zip)*
    последней версии или зелёная кнопка **Code** → **Download ZIP**.
 2. Щёлкните скачанный ZIP правой кнопкой → *Свойства* → отметьте **Разблокировать** → *ОК* (иначе Windows будет
    спрашивать про каждый скрипт). Распакуйте в любую папку, например `C:\Programs\AnimeClipStudio`.
@@ -262,7 +262,7 @@ Program Files, `C:\FFmpeg` и `C:\mpv` (*Инструменты → Внешни
 ```bat
 winget install --id astral-sh.uv -e           :: или см. https://docs.astral.sh/uv/
 winget install --id Gyan.FFmpeg -e            :: или любая сборка FFmpeg в PATH / vendor
-git clone https://github.com/USERNAME/anime-clip-studio.git
+git clone https://github.com/danhoc/anime-clip-studio.git
 cd anime-clip-studio
 uv sync                                        :: Python 3.13 и зависимости в .venv
 copy <путь>\libmpv-2.dll vendor\

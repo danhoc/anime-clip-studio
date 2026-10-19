@@ -9,7 +9,7 @@ project: no ads, no accounts, no telemetry, and nothing is downloaded without yo
 
 > **Disclaimer.** This app was created with the help of [Claude](https://claude.ai), an AI assistant by Anthropic.
 > The author has no experience in software development. The program is provided as is, without any warranty
-> (see the [license](LICENSE)); please report problems in [Issues](https://github.com/USERNAME/anime-clip-studio/issues).
+> (see the [license](LICENSE)); please report problems in [Issues](https://github.com/danhoc/anime-clip-studio/issues).
 
 **[Русская версия →](README.ru.md)**
 
@@ -187,7 +187,7 @@ name and size if they were moved. The keys can be changed in the same dialog or 
 *Help → Check for updates…* asks GitHub whether a newer version exists and shows what is new. Nothing is downloaded
 until you press **Download and install**:
 
-- a copy downloaded as a ZIP is compared with the latest [release](https://github.com/USERNAME/anime-clip-studio/releases);
+- a copy downloaded as a ZIP is compared with the latest [release](https://github.com/danhoc/anime-clip-studio/releases);
   the update downloads it, checks the archive and replaces the program files — `.venv`, `vendor` (FFmpeg, libmpv)
   and your projects, presets and settings stay as they are;
 - a copy installed with Git shows the new commits of its branch and updates with `git pull --ff-only` (refused while
@@ -235,7 +235,7 @@ repository (see [`vendor/README.md`](vendor/README.md)).
 
 ### Simple installation (download)
 
-1. Download the program: **[Releases](https://github.com/USERNAME/anime-clip-studio/releases)** → *Source code
+1. Download the program: **[Releases](https://github.com/danhoc/anime-clip-studio/releases)** → *Source code
    (zip)* of the latest version, or the green **Code** button → **Download ZIP**.
 2. Right-click the downloaded ZIP → *Properties* → tick **Unblock** → *OK* (otherwise Windows asks about every
    script). Unpack it to a folder of your choice, e.g. `C:\Programs\AnimeClipStudio`.
@@ -259,7 +259,7 @@ repository (see [`vendor/README.md`](vendor/README.md)).
 ```bat
 winget install --id astral-sh.uv -e           :: or see https://docs.astral.sh/uv/
 winget install --id Gyan.FFmpeg -e            :: or any FFmpeg build in PATH / vendor
-git clone https://github.com/USERNAME/anime-clip-studio.git
+git clone https://github.com/danhoc/anime-clip-studio.git
 cd anime-clip-studio
 uv sync                                        :: Python 3.13 + dependencies into .venv
 copy <path>\libmpv-2.dll vendor\
