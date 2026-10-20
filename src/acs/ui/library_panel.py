@@ -83,34 +83,67 @@ class _NameDelegate(QStyledItemDelegate):
     def __init__(self, tree: QTreeWidget):
         super().__init__(tree)
         self._tree = tree
+        # Row heights are measured at `_hint_col` (the column width when they were last laid out)
+        # until relayout() runs after a resize: while a splitter is dragged the tree asks for
+        # hundreds of size hints per step, and wrapping every name each time made the drag stutter.
+        self._hint_col: int | None = None
+        self._hints: dict[tuple, QSize] = {}
 
-    def _text_width(self, index) -> int:
+    @staticmethod
+    def _depth(index) -> int:
         depth = 1   # top-level items are indented too (decorated root)
         p = index.parent()
         while p.isValid():
             depth += 1
             p = p.parent()
-        margin = self._tree.style().pixelMetric(QStyle.PixelMetric.PM_FocusFrameHMargin) + 1
-        return self._tree.columnWidth(0) - depth * self._tree.indentation() - 2 * margin
+        return depth
 
-    def _lines(self, opt: QStyleOptionViewItem, index) -> list[str] | None:
+    def _text_width(self, index, col_width: int | None = None) -> int:
+        margin = self._tree.style().pixelMetric(QStyle.PixelMetric.PM_FocusFrameHMargin) + 1
+        col = self._tree.columnWidth(0) if col_width is None else col_width
+        return col - self._depth(index) * self._tree.indentation() - 2 * margin
+
+    def _lines(self, opt: QStyleOptionViewItem, index, col_width: int | None = None,
+               max_lines: int = NAME_LINES) -> list[str] | None:
         if index.column() != 0 or index.data(KIND_ROLE) != "file":
             return None
-        return wrap_name(opt.text, opt.font, self._text_width(index))
+        return wrap_name(opt.text, opt.font, self._text_width(index, col_width), max_lines)
+
+    def column_resized(self, old: int) -> None:
+        """Column 0 changed width: keep the heights measured at the old width until relayout()."""
+        if self._hint_col is None:
+            self._hint_col = old
+
+    def relayout(self) -> None:
+        self._hint_col = None
+        self._hints.clear()
+        self._tree.doItemsLayout()
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802 - Qt API
+        col = self._hint_col if self._hint_col is not None else self._tree.columnWidth(0)
+        font = index.data(Qt.ItemDataRole.FontRole)   # the opened episode is bold (wider)
+        key = (index.data(), index.data(KIND_ROLE), font.key() if font is not None else "",
+               self._depth(index), col)
+        size = self._hints.get(key)
+        if size is not None:
+            return size
         size = super().sizeHint(option, index)
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
-        lines = self._lines(opt, index)
-        if not lines or len(lines) < 2:
-            return size
-        return QSize(size.width(), size.height() + (len(lines) - 1) * QFontMetrics(opt.font).lineSpacing())
+        lines = self._lines(opt, index, col)
+        if lines and len(lines) > 1:
+            size = QSize(size.width(), size.height() + (len(lines) - 1) * QFontMetrics(opt.font).lineSpacing())
+        if len(self._hints) > 5000:
+            self._hints.clear()
+        self._hints[key] = size
+        return size
 
     def paint(self, painter, option, index) -> None:
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
-        lines = self._lines(opt, index)
+        # the current width, but no more lines than the row (possibly measured at the old width) holds
+        fits = max(1, opt.rect.height() // QFontMetrics(opt.font).lineSpacing())
+        lines = self._lines(opt, index, max_lines=min(NAME_LINES, fits))
         if lines is None:
             super().paint(painter, option, index)
             return
@@ -211,14 +244,20 @@ class LibraryPanel(QWidget):
         hdr.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         hdr.customContextMenuRequested.connect(self._header_menu)
         self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
-        self.tree.setItemDelegateForColumn(0, _NameDelegate(self.tree))
+        self._names = _NameDelegate(self.tree)
+        self.tree.setItemDelegateForColumn(0, self._names)
         self.tree.setAlternatingRowColors(True)   # tells neighbouring multi-line names apart
         # wrapped names change their row height with the column width: re-measure rows after a resize
         self._relayout_timer = QTimer(self)
         self._relayout_timer.setSingleShot(True)
         self._relayout_timer.setInterval(60)
-        self._relayout_timer.timeout.connect(self.tree.doItemsLayout)
-        hdr.sectionResized.connect(lambda i, _old, _new: self._relayout_timer.start() if i == 0 else None)
+        self._relayout_timer.timeout.connect(self._names.relayout)
+
+        def resized(i: int, old: int, _new: int) -> None:
+            if i == 0:
+                self._names.column_resized(old)
+                self._relayout_timer.start()
+        hdr.sectionResized.connect(resized)
         self.setMinimumWidth(280)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.setFocusPolicy(Qt.FocusPolicy.ClickFocus)

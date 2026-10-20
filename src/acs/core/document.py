@@ -212,6 +212,17 @@ class ProjectDocument(QObject):
             return
         self.undo.push(SetMarkerFieldsCmd(self, mid, fields, text))
 
+    def set_markers_hidden(self, ids: list[str], hidden: bool) -> None:
+        """Hide / show several markers as one undo step."""
+        ids = [i for i in ids if (m := self.project.marker_by_id(i)) is not None and m.hidden != hidden]
+        if not ids:
+            return
+        text = tr("Hide markers") if hidden else tr("Show markers")
+        self.undo.beginMacro(text)
+        for mid in ids:
+            self.undo.push(SetMarkerFieldsCmd(self, mid, {"hidden": hidden}, text))
+        self.undo.endMacro()
+
     def move_marker(self, mid: str, frame: int) -> None:
         m = self.project.marker_by_id(mid)
         if m is not None and m.frame != frame:

@@ -38,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_TITLE)
     t = theme.apply(app, settings.theme)
+    theme.install_caption_colors(app)
     trace.log("session", f"theme={settings.theme}->{t.name}")
     install_qt_translations(app, settings.language)  # Qt's own strings: OK / Cancel / Save / file dialogs …
     tracer = EventTracer(app)

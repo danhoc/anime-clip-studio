@@ -15,6 +15,16 @@ class FlowLayout(QLayout):
         super().__init__(parent)
         self._items: list[QLayoutItem] = []
         self._gap = spacing
+        # Item size hints and heights per width, until the layout is invalidated (an item changed):
+        # styled tool buttons compute their size hints slowly, and a splitter drag asks for the
+        # height at every width it passes, several times.
+        self._hints: list[tuple[QLayoutItem, QSize]] | None = None
+        self._heights: dict[int, int] = {}
+
+    def invalidate(self) -> None:
+        self._hints = None
+        self._heights.clear()
+        super().invalidate()
 
     # ---- QLayout API ----
     def addItem(self, item: QLayoutItem) -> None:  # noqa: N802 - Qt API
@@ -36,7 +46,10 @@ class FlowLayout(QLayout):
         return True
 
     def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt API
-        return self._arrange(QRect(0, 0, width, 0), apply=False)
+        h = self._heights.get(width)
+        if h is None:
+            h = self._heights[width] = self._arrange(QRect(0, 0, width, 0), apply=False)
+        return h
 
     def setGeometry(self, rect: QRect) -> None:  # noqa: N802 - Qt API
         super().setGeometry(rect)
@@ -65,32 +78,36 @@ class FlowLayout(QLayout):
     def _visible(self) -> list[QLayoutItem]:
         return [it for it in self._items if not it.isEmpty()]
 
+    def _sized(self) -> list[tuple[QLayoutItem, QSize]]:
+        if self._hints is None:
+            self._hints = [(it, it.sizeHint()) for it in self._visible()]
+        return self._hints
+
     def _arrange(self, rect: QRect, apply: bool) -> int:
         """Place the items (when `apply`) and return the height needed for `rect.width()`."""
         m = self.contentsMargins()
         area = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
-        rows: list[list[QLayoutItem]] = []
-        row: list[QLayoutItem] = []
+        rows: list[list[tuple[QLayoutItem, QSize]]] = []
+        row: list[tuple[QLayoutItem, QSize]] = []
         used = 0
-        for it in self._visible():
-            w = it.sizeHint().width()
+        for it, s in self._sized():
+            w = s.width()
             if row and used + self._gap + w > area.width():
                 rows.append(row)
                 row, used = [], 0
             used += (self._gap if row else 0) + w
-            row.append(it)
+            row.append((it, s))
         if row:
             rows.append(row)
         y = area.y()
         for r in rows:
-            h = max(it.sizeHint().height() for it in r)
+            h = max(s.height() for _it, s in r)
             if apply:
-                free = area.width() - sum(it.sizeHint().width() for it in r) - self._gap * (len(r) - 1)
+                free = area.width() - sum(s.width() for _it, s in r) - self._gap * (len(r) - 1)
                 x = area.x()
-                for k, it in enumerate(r):
+                for k, (it, s) in enumerate(r):
                     if r is rows[-1] and k == len(r) - 1:
                         x += max(0, free)
-                    s = it.sizeHint()
                     it.setGeometry(QRect(x, y + (h - s.height()) // 2, s.width(), s.height()))
                     x += s.width() + self._gap
             y += h + self._gap

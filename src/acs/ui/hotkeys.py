@@ -51,6 +51,8 @@ MOUSE_HINTS: list[tuple[str, str]] = [
     ("Wheel / Shift + wheel", "Scroll timeline"),
     ("Click / drag on timeline", "Seek (scrub)"),
     ("Drag clip edge", "Move In / Out (snaps to frames, markers, keyframes)"),
+    ("Click a marker", "Go to the marker (drag it to move it)"),
+    ("Point at a marker", "Show its name (all markers are in the Markers tab)"),
     ("Alt while dragging", "Disable snapping"),
     ("Right click clip edge", "Change that edge with the playhead, then press I / O"),
     ("Ctrl + click clip", "Add clip to selection"),

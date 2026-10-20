@@ -89,6 +89,8 @@ RU: dict[str, str] = {
     "Click / drag on timeline": "Клик / перетаскивание по таймлайну",
     "Seek (scrub)": "Перемотка",
     "Drag clip edge": "Тянуть край клипа",
+    "Click a marker": "Клик по метке",
+    "Go to the marker (drag it to move it)": "Перейти к метке (перетаскивание сдвигает её)",
     "Move In / Out (snaps to frames, markers, keyframes)": "Сдвинуть In / Out (привязка к кадрам, меткам, ключевым кадрам)",
     "Alt while dragging": "Alt при перетаскивании",
     "Disable snapping": "Без привязки",
@@ -209,7 +211,7 @@ RU: dict[str, str] = {
         "Клик — перейти к этому краю клипа · перетаскивание — сдвинуть его · Alt — без привязки · "
         "правый клик — изменить его курсором воспроизведения",
     "Clip lanes — press I to start a clip, O to end it": "Дорожки клипов — I начинает клип, O завершает его",
-    "Drag to move the marker · Del — delete": "Тяните, чтобы сдвинуть метку · Del — удалить",
+    "Click: go to the marker · drag to move it · Del — delete": "Клик — перейти к метке · тяните, чтобы сдвинуть · Del — удалить",
     "Ctrl+wheel — zoom · wheel — scroll · click — seek · right click — menu":
         "Ctrl+колесо — масштаб · колесо — прокрутка · клик — перемотка · правый клик — меню",
     "Add marker here": "Добавить метку здесь",
@@ -590,6 +592,7 @@ RU: dict[str, str] = {
     # ---- theme / preview quality / transport ----
     "Theme (after restart)": "Тема (после перезапуска)",
     "Dark": "Тёмная", "Light": "Светлая", "As in Windows": "Как в Windows",
+    "Steel blue": "Стально-синяя", "Deep teal": "Глубокая бирюза", "Indigo": "Индиго", "Sand": "Песочная",
     "Timeline thumbnails": "Миниатюры на таймлайне",
     "Height of the timeline thumbnails. Higher = sharper on 4K screens, a bit slower to generate the first time.":
         "Высота миниатюр на таймлайне. Больше — чётче на 4K-экранах, но первая генерация чуть дольше.",
@@ -833,4 +836,21 @@ RU: dict[str, str] = {
     "{key} saves the current frame to the “frames” folder inside the output folder, in the format last chosen in “{frames}”; subtitles are drawn when the player shows them.": "{key} сохраняет текущий кадр в папку «frames» внутри папки вывода, в формате, выбранном последним в «{frames}»; субтитры рисуются, если они показаны в плеере.",
     "The file name template has an unknown variable or a stray brace. Variables: {video} {time} {frame}": "В шаблоне имени файла неизвестная переменная или лишняя фигурная скобка. Переменные: {video} {time} {frame}",
     "The file name template needs {time} or {frame}, otherwise every frame gets the same name.": "В шаблоне имени файла нужна переменная {time} или {frame}, иначе все кадры получат одно и то же имя.",
+    "Add": "Добавить",
+    "Add marker at the playhead": "Добавить метку на месте плейхеда",
+    "Delete selected markers": "Удалить выбранные метки",
+    "Time": "Время",
+    "Shown on the timeline": "Показывать на таймлайне",
+    "No markers yet. Press {key} to add one at the playhead.": "Меток пока нет. Нажмите {key}, чтобы добавить метку на месте плейхеда.",
+    "Double-click to rename": "Двойной клик — переименовать",
+    "Hide all": "Скрыть все",
+    "Show all": "Показать все",
+    "Go to marker": "Перейти к метке",
+    "Show on the timeline": "Показать на таймлайне",
+    "Hide from the timeline": "Скрыть с таймлайна",
+    "Hide markers": "Скрыть метки",
+    "Show markers": "Показать метки",
+    "Point at a marker": "Навести на метку",
+    "Show its name (all markers are in the Markers tab)": "Показать её название (все метки — на вкладке «Метки»)",
+    "The “{tab}” tab next to the player lists every marker with its time and name: click one to go to it, double-click a name to rename it, untick a marker to hide it from the timeline. On the timeline a marker's name shows when you point at it.": "На вкладке «{tab}» рядом с плеером — все метки со временем и названиями: клик переходит к метке, двойной клик по названию переименовывает её, снятый флажок скрывает метку с таймлайна. На самом таймлайне название метки видно при наведении мыши.",
 }

@@ -37,7 +37,9 @@ def table_strings() -> set[str]:
     from acs.ui.mpv_script_dialog import KIND_TITLE
     from acs.core.tools import OFFICIAL_LINKS
 
-    s: set[str] = set(MARKER_COLOR_NAMES) | {"Edit marker"}
+    from acs.ui.theme import THEME_CHOICES
+
+    s: set[str] = set(MARKER_COLOR_NAMES) | {"Edit marker"} | {label for _key, label in THEME_CHOICES}
     s.update(title for _o, _d, title in ACTIONS.values())
     s.update(KIND_TITLE.values())
     s.update(Conflict("marker", "", k, "", "").consequence() for k in ("input_conf", "builtin", "script", "duplicate"))

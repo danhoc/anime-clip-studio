@@ -103,6 +103,9 @@ class QuickHelpDialog(QDialog):
                "Ctrl+S saves the project as a file."),
             tr("Drag the playhead to an edge of a zoomed timeline to scroll it. Alt while dragging a clip edge "
                "turns snapping off."),
+            tr("The “{tab}” tab next to the player lists every marker with its time and name: click one to go to "
+               "it, double-click a name to rename it, untick a marker to hide it from the timeline. On the "
+               "timeline a marker's name shows when you point at it.").format(tab=tr("Markers")),
             tr("Arrow step sizes, theme, interface size and preview quality: {settings}. Language, theme and "
                "interface size apply after a restart.").format(settings=settings),
             tr("Shorts Mode ({menu}): every clip gets a 9:16 YouTube Shorts frame over the video. Drag it to move "
@@ -202,7 +205,7 @@ class TourOverlay(QWidget):
         self.step = 0
         self.bubble = QWidget(self)
         self.bubble.setObjectName("bubble")
-        t = theme.current()   # the bubble and its pictures follow the dark / light theme
+        t = theme.current()   # the bubble and its pictures follow the theme
         self.bubble.setStyleSheet(f"#bubble {{ background: {t.tooltip_bg}; border: 1px solid {t.accent};"
                                   f" border-radius: 8px; }} QLabel {{ color: {t.text}; }}")
         bl = QVBoxLayout(self.bubble)
@@ -273,7 +276,7 @@ class TourOverlay(QWidget):
         self._reveal_target()
         self.title.setText(f"{self.step + 1}/{len(TOUR_STEPS)} · {tr(title)}")
         self.text.setText(tr(text))
-        pm = tour_art.picture(key, self.devicePixelRatioF(), theme.current().name)
+        pm = tour_art.picture(key, self.devicePixelRatioF(), "dark" if theme.current().dark else "light")
         self.picture.setVisible(pm is not None)
         if pm is not None:
             self.picture.setPixmap(pm)

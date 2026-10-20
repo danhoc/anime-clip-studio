@@ -1,8 +1,14 @@
 # Anime Clip Studio
 
-**Frame-accurate clipping and frame extraction for anime episodes stored on your PC.**
-Mark any number of clips on one timeline, export them without quality loss (smart cut) or re-encode them
-for Discord, YouTube Shorts, GIF or WebP, and save hundreds of frames with duplicates skipped.
+I generated this app for my own use, since I wasn't satisfied with the limited functionality of simpler apps like
+HandBrake and didn't want to deal with heavier video editing software more than necessary. The app is based on
+ffmpeg and mpv. Its main functionality is frame-accurate marking of clips on a single timeline and their batch export
+(rendering several selected clips from one video file at the same time). The app offers a choice of all the major
+codecs, the ability to burn in hardsubs, export video with the frame cropped, and also automatically export
+screenshots and turn clips into gif/webp images. In the *Tools → External tools…* menu you can also add a script to
+your own mpv to place markers while watching, which will be picked up by the app automatically when you open the
+video file. Although the app mentions anime in its name, which is what I generated it for, I don't think there are
+any restrictions on using it with any video files.
 
 Windows 10 / 11 · English and Russian interface · free and open source ([GPL-3.0](LICENSE)) · a non-commercial
 project: no ads, no accounts, no telemetry, and nothing is downloaded without your consent.
@@ -74,6 +80,10 @@ project: no ads, no accounts, no telemetry, and nothing is downloaded without yo
   **Ctrl+0** shows the whole episode. Drag the playhead to an edge of a zoomed timeline to scroll it.
 - **I** starts a clip, **O** ends it (the current frame is included), **M** adds a coloured marker. Any number of
   clips; overlapping clips go to extra lanes, which appear only while clips overlap.
+- The *Markers* tab next to the player lists every marker with its time and name: click one to go to it,
+  double-click a name to rename it, untick a marker to hide it from the timeline. On the timeline a marker's name
+  shows when you point at it; clicking a marker goes to it there too. Hidden markers are skipped by **↑ / ↓** and
+  clip edges do not snap to them.
 - Drag a clip edge to move it: it snaps to frames, markers and keyframes (hold **Alt** to turn snapping off). Or
   right-click an edge, move the playhead and press **I** / **O** to set it again.
 - Every change can be undone: **Ctrl+Z / Ctrl+Y**, the full list is in the *History* tab.
@@ -83,8 +93,8 @@ project: no ads, no accounts, no telemetry, and nothing is downloaded without yo
 ![Manual crop with a 4:3 ratio adjusted right over the video](docs/screenshots/en/crop.png)
 
 The table under the timeline lists all clips of the episode (double-click a name to rename it, double-click a row to
-jump to the clip). The column next to the player holds the settings of the **selected clip**; select several clips
-to change them together:
+jump to the clip). The *Clip* tab next to the player holds the settings of the **selected clip**; select several
+clips to change them together:
 
 - **Mute audio** or pick another **audio track** (e.g. Japanese / dub).
 - **Burn in subtitles**: any text track of the file, ASS styling and fonts embedded in the MKV included, with an
@@ -308,6 +318,8 @@ run.bat                                        :: or: uv run python -m acs [vide
 | Right-click clip edge | change that edge with the playhead, then press I / O |
 | Ctrl + click clip | add clip to selection |
 | Double-click clip | jump to clip start |
+| Click a marker | go to it (drag it to move it) |
+| Point at a marker | show its name |
 | Double-click the time display | go to a time or frame number |
 | Drag the frame over the video | move the Shorts frame or the manual crop |
 | Drag a frame corner / edge, or wheel | resize it (a chosen aspect ratio is kept) |

@@ -52,6 +52,7 @@ class Marker:
     time: float
     label: str = ""
     color: str = "#f5c542"
+    hidden: bool = False           # not drawn on the timeline, skipped by snapping and ↑ / ↓ (Markers tab)
     id: str = field(default_factory=new_id)
 
 

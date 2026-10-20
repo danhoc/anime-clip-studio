@@ -10,10 +10,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QEvent, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QFont, QFontMetrics, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QFontMetrics, QKeySequence
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider,
-                               QSplitter, QStackedWidget, QTabWidget, QToolButton, QUndoView, QVBoxLayout, QWidget)
+                               QStackedWidget, QTabWidget, QToolButton, QUndoView, QVBoxLayout, QWidget)
 
 from acs import APP_TITLE, __version__
 from acs.core import mpv_markers, recovery, trace
@@ -46,7 +46,8 @@ from acs.ui.frames_dialog import FramesDialog
 from acs.ui.help import QuickHelpDialog, ShortcutsDialog, TourOverlay
 from acs.ui.hotkeys import STEP_MODS, key_for, step_text, with_key
 from acs.ui.library_panel import LibraryPanel
-from acs.ui.panes import PaneToggle
+from acs.ui.marker_panel import MarkerPanel
+from acs.ui.panes import PaneToggle, SnapSplitter
 from acs.ui.player import MpvPlayer
 from acs.ui.preset_editor import PresetEditor
 from acs.ui.queue_panel import QueuePanel
@@ -194,15 +195,25 @@ class MainWindow(QMainWindow):
         # ---- transport bar ----
         bar = QWidget()
         bar.setObjectName("transport")
-        c_in, c_out, c_mark = (("#3fb36b", "#e5534b", "#d4a72c") if t.name == "dark"
+        c_in, c_out, c_mark = (("#3fb36b", "#e5534b", "#d4a72c") if t.dark
                                else ("#1f8a4c", "#c0392b", "#9a6a00"))
+
+        def tint(c: str, alpha: int) -> str:
+            q = QColor(c)
+            return f"rgba({q.red()},{q.green()},{q.blue()},{alpha})"
+
+        # Marking buttons: coloured text on a faint tint of the same colour (no outline), a little
+        # stronger on hover / press, so the colour coding stays without boxing every button in
+        marks = "".join(
+            f"#transport QToolButton#{n} {{ color: {c}; background: {tint(c, 28)}; border: none; }}"
+            f"#transport QToolButton#{n}:hover {{ background: {tint(c, 55)}; }}"
+            f"#transport QToolButton#{n}:pressed {{ background: {tint(c, 85)}; }}"
+            for n, c in (("mark_in", c_in), ("mark_out", c_out), ("mark_marker", c_mark)))
         bar.setStyleSheet(f"#transport {{ background: {t.transport_bg}; border-top: 1px solid {t.border}; }}"
                           "#transport QToolButton { padding: 4px 4px; }"
                           "#transport QToolButton#mark_in, #transport QToolButton#mark_out,"
-                          "#transport QToolButton#mark_marker { padding: 4px 8px; border-radius: 4px; }"
-                          f"#transport QToolButton#mark_in {{ color: {c_in}; border: 1px solid {c_in}; }}"
-                          f"#transport QToolButton#mark_out {{ color: {c_out}; border: 1px solid {c_out}; }}"
-                          f"#transport QToolButton#mark_marker {{ color: {c_mark}; border: 1px solid {c_mark}; }}")
+                          "#transport QToolButton#mark_marker { padding: 4px 10px; border-radius: 4px; }"
+                          + marks)
         # Four groups (navigation, time, marking, tracks + export) in one row from 1920 px screens on
         # (library open, both languages); on narrower ones (1366 px) the bar wraps onto a second row
         # instead of widening the window.
@@ -274,11 +285,10 @@ class MainWindow(QMainWindow):
         for lab in (self.l_time, self.l_frame):
             lab.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         bl = group()
-        self.b_in = tb("[ " + tr("Clip start") + " I", "Set clip In (starts a new clip)", "set_in",
-                       bold=True, name="mark_in")
-        self.b_out = tb(tr("Clip end") + " O ]", "Set clip Out (current frame included)", "set_out",
-                        bold=True, name="mark_out")
-        self.b_marker = tb("⚑ " + tr("Marker") + " M", "Add marker", "marker", bold=True, name="mark_marker")
+        # the shortcut keys are in the tooltips; the labels stay short
+        self.b_in = tb(tr("Clip start"), "Set clip In (starts a new clip)", "set_in", name="mark_in")
+        self.b_out = tb(tr("Clip end"), "Set clip Out (current frame included)", "set_out", name="mark_out")
+        self.b_marker = tb("⚑ " + tr("Marker"), "Add marker", "marker", name="mark_marker")
         bl = group()
         self.l_speed = QLabel("")
         bl.addWidget(self.l_speed)
@@ -339,9 +349,16 @@ class MainWindow(QMainWindow):
         props_scroll.setWidgetResizable(True)
         props_scroll.setFrameShape(QFrame.Shape.NoFrame)
         props_scroll.setMinimumWidth(320)
-        self.top_split = QSplitter(Qt.Orientation.Horizontal)
+        # Markers get a tab of their own beside the clip settings: the timeline shows a marker's name
+        # only under the mouse, the full list (navigation, renaming, hiding) is here.
+        self.marker_panel = MarkerPanel(self.doc)
+        self.props_tabs = QTabWidget()
+        self.props_tabs.setDocumentMode(True)
+        self.props_tabs.addTab(props_scroll, tr("Clip"))
+        self.props_tabs.addTab(self.marker_panel, tr("Markers"))
+        self.top_split = SnapSplitter(Qt.Orientation.Horizontal)
         self.top_split.addWidget(self.player_stack)
-        self.top_split.addWidget(props_scroll)
+        self.top_split.addWidget(self.props_tabs)
         self.top_split.setStretchFactor(0, 4)
         self.top_split.setStretchFactor(1, 1)
         self.top_split.setCollapsible(0, False)
@@ -365,7 +382,7 @@ class MainWindow(QMainWindow):
         th.setSpacing(0)
         th.addWidget(self.timeline, 1)
         th.addWidget(self.timeline.zoom_bar)
-        self.split = QSplitter(Qt.Orientation.Vertical)
+        self.split = SnapSplitter(Qt.Orientation.Vertical)
         self.split.addWidget(top)
         self.split.addWidget(tl_block)
         self.split.addWidget(self.clip_panel)
@@ -393,7 +410,7 @@ class MainWindow(QMainWindow):
         self.side.addTab(self.library, tr("Library"))
         self.side.addTab(self.queue_panel, tr("Export queue"))
         self.side.addTab(self.undo_view, tr("History"))
-        self.outer = QSplitter(Qt.Orientation.Horizontal)
+        self.outer = SnapSplitter(Qt.Orientation.Horizontal)
         self.outer.addWidget(self.split)
         self.outer.addWidget(self.side)
         self.outer.setStretchFactor(0, 1)
@@ -600,6 +617,8 @@ class MainWindow(QMainWindow):
         self.timeline.hint.connect(self.hint.setText)
         self.timeline.context_action.connect(self._timeline_action)
         self.clip_panel.seek_requested.connect(self.seek)
+        self.marker_panel.seek_requested.connect(self.seek)
+        self.marker_panel.add_requested.connect(self.add_marker)
         self.clip_panel.detect_crop_requested.connect(self.detect_crop)
         self.clip_panel.preview_crop.connect(self._preview_crop)
         self.clip_panel.edit_presets_requested.connect(self.edit_presets)
@@ -1272,7 +1291,7 @@ class MainWindow(QMainWindow):
         if not self.doc.has_video:
             return
         p = self.doc.project
-        frames = {m.frame for m in p.markers}
+        frames = {m.frame for m in p.markers if not m.hidden}
         for c in p.clips:
             frames.add(c.in_frame)
             if c.out_frame is not None:
@@ -1774,6 +1793,7 @@ class MainWindow(QMainWindow):
                    "presets": self.clip_panel.defaults_box, "tools": self.menuBar(),
                    "mpv": self.menuBar(), "help": self.menuBar()}
         self.show_panel(self.library)
+        self.props_tabs.setCurrentWidget(self.props_scroll)
         tour = self._tour = TourOverlay(self, targets)
 
         def done(never: bool):

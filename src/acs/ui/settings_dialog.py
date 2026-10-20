@@ -66,7 +66,7 @@ class SettingsDialog(QDialog):
         self.scale.setToolTip(tip)
         f.addRow(tr("Interface size (after restart)"), self.scale)
         self.theme = QComboBox()
-        for key, label in (("dark", "Dark"), ("light", "Light"), ("system", "As in Windows")):
+        for key, label in theme.THEME_CHOICES:
             self.theme.addItem(tr(label), key)
         self.theme.setCurrentIndex(max(0, self.theme.findData(settings.theme)))
         f.addRow(tr("Theme (after restart)"), self.theme)

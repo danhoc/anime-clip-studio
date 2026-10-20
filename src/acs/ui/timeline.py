@@ -18,7 +18,8 @@ from collections import deque
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import (QAction, QColor, QFont, QFontMetricsF, QIcon, QImage, QPainter, QPainterPath, QPen,
+                           QPixmap, QPolygonF)
 from PySide6.QtWidgets import QColorDialog, QInputDialog, QMenu, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 from acs.core import thumbs, trace
@@ -31,6 +32,8 @@ from acs.ui import icons, theme
 from acs.ui.hotkeys import with_key
 
 RULER_H = 26
+MARKER_TAG_W, MARKER_TAG_H = 9, 11   # marker tag in the ruler; its point touches the marker line
+PLAYHEAD_W, PLAYHEAD_HEAD_W, PLAYHEAD_HEAD_H = 2, 11, 15   # line width, head size (keep under 16 px wide)
 LANE_H = 39                      # one clip lane
 LANE_GAP = 4
 MAX_LANES = 3                    # lanes shown at most; more overlapping clips are squeezed into them
@@ -44,6 +47,8 @@ ROW_SIZES = (  # (min logical screen height, thumbnail row, waveform row)
 SMALL_SCREEN_H = 800             # logical screen height below which the main window uses smaller panes
 CLICK_PX = 4                     # a press on a clip edge that moves less than this is a click (seek)
 WAVE_REF_PERCENTILE = 99.97     # auto gain reference: (almost) the loudest moment of the track
+WAVE_SMOOTH = 1.2                # outline smoothing (gaussian sigma, logical px)
+WAVE_LINE_W = 1.6                # outline thickness (logical px)
 WAVE_KNEE = 0.85                 # above this, peaks are compressed smoothly instead of clipped
 EDGE_PX = 6
 SNAP_PX = 8
@@ -57,6 +62,7 @@ EDGE_AWAY_PX_S = 60              # moving back from the edge faster than this st
 EDGE_VELOCITY_S = 0.08           # mouse speed is measured over this window
 EDGE_RAMP_UP, EDGE_RAMP_DOWN = 10.0, 30.0   # 1/s: how quickly the glide speeds up / slows down
 EDGE_TICK_MS = 16
+RESIZE_SETTLE_MS = 120           # the background is redrawn this long after the width stopped changing
 TICK_STEPS = [1 / 24, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200]
 
 C_BG = QColor("#1b1d22")
@@ -66,7 +72,7 @@ C_DIM = QColor("#6b717d")
 C_KEY = QColor("#e0b341")
 C_PLAYHEAD = QColor("#ff4d4d")
 C_MARKER = QColor("#f5c542")
-C_WAVE = QColor("#4fb38f")
+C_WAVE = QColor("#7d9cc4")
 C_GRID = QColor(255, 255, 255, 22)
 C_THUMBS_BG = QColor("#15171b")
 C_WAVE_BG = QColor("#191c20")
@@ -100,20 +106,73 @@ def lane_area_height(lane_count: int) -> int:
 
 
 def _sync_colors() -> None:
-    """Pick up the active theme (dark / light)."""
+    """Pick up the active theme."""
     global C_BG, C_RULER, C_TEXT, C_DIM, C_KEY, C_GRID, C_WAVE, C_THUMBS_BG, C_WAVE_BG, C_OUTLINE, C_CLIP_TEXT
     global C_LANES_BG, C_LANE
     t = theme.current()
-    C_BG, C_RULER = QColor(t.timeline_bg), QColor(t.ruler_bg)
+    C_BG, C_RULER = theme.qcolor(t.timeline_bg), theme.qcolor(t.ruler_bg)
     C_TEXT, C_DIM = QColor(t.text), QColor(t.dim)
-    C_KEY = QColor("#e0b341" if t.name == "dark" else "#b07d00")
+    C_KEY = QColor("#e0b341" if t.dark else "#b07d00")
     C_GRID = theme.qcolor(t.grid)
-    C_WAVE, C_THUMBS_BG, C_WAVE_BG = QColor(t.wave), QColor(t.thumbs_bg), QColor(t.wave_bg)
-    C_OUTLINE = QColor("#ffffff" if t.name == "dark" else "#10141a")
+    C_WAVE, C_THUMBS_BG, C_WAVE_BG = QColor(t.wave), theme.qcolor(t.thumbs_bg), theme.qcolor(t.wave_bg)
+    C_OUTLINE = QColor("#ffffff" if t.dark else "#10141a")
     C_CLIP_TEXT = QColor(t.clip_label)
-    dark = t.name == "dark"
-    C_LANES_BG = QColor(t.thumbs_bg)
+    dark = t.dark
+    C_LANES_BG = theme.qcolor(t.thumbs_bg)
     C_LANE = QColor(255, 255, 255, 12) if dark else QColor(0, 0, 0, 14)
+
+
+def wave_image(amp: np.ndarray, h: int, color: QColor, line_w: float) -> QImage:
+    """The waveform row as an image, one column per device pixel (amp: column heights in device px,
+    line_w: outline thickness in device px).
+
+    Rasterised with numpy instead of QPainter: an antialiased polygon / polyline over thousands of
+    jagged points cost tens of milliseconds per frame, which made zooming and edge scrolling stutter.
+    A translucent fill fades towards the base under an outline of even thickness: each pixel's
+    coverage comes from its distance to the polyline through the column tops (not from a vertical
+    band per column, which went one pixel thin on steep slopes and stair-stepped on gentle ones)."""
+    w = len(amp)
+    if w == 0 or h <= 0:
+        return QImage()
+    above = (h - 1 - np.arange(h, dtype=np.float32))[:, None]    # height of each row's bottom edge
+    a = amp.astype(np.float32)
+    cov = np.clip(a[None, :] - above, 0.0, 1.0)                     # how much of the pixel is under the top
+    # Distance from each pixel centre to the segments between neighbouring column tops (point j at
+    # x = j + 0.5); a line at most a few px thick can only reach a column from segments within ±2.
+    # Only the rows the line can reach are computed.
+    r0 = max(0, int(h - 1 - (float(a.max()) + line_w)))
+    r1 = min(h, int(h - (float(a.min()) - line_w)) + 1)
+    py = above[r0:r1] + 0.5
+    ap = np.pad(a, 2, mode="edge")
+    d2 = None
+    for o in (-2, -1, 0, 1):
+        ay = ap[2 + o:2 + o + w][None, :]
+        dy = ap[3 + o:3 + o + w][None, :] - ay
+        t = np.clip((np.float32(-o) + (py - ay) * dy) / (1.0 + dy * dy), 0.0, 1.0)
+        ex, ey = o + t, ay + t * dy - py
+        d = ex * ex + ey * ey
+        d2 = d if d2 is None else np.minimum(d2, d)
+    line = np.zeros((h, w), dtype=np.float32)
+    line[r0:r1] = np.clip(line_w / 2 + 0.5 - np.sqrt(d2), 0.0, 1.0)
+    fill_alpha = np.linspace(150, 45, h, dtype=np.float32)[:, None]  # top -> base
+    alpha = np.maximum(cov * fill_alpha, line * 255.0)
+    buf = np.empty((h, w, 4), dtype=np.uint8)                      # premultiplied BGRA
+    f = alpha / 255.0
+    buf[..., 0] = color.blue() * f
+    buf[..., 1] = color.green() * f
+    buf[..., 2] = color.red() * f
+    buf[..., 3] = alpha
+    img = QImage(buf.data, w, h, w * 4, QImage.Format.Format_ARGB32_Premultiplied)
+    return img.copy()   # own the pixels: buf is freed on return
+
+
+def smooth(vals: np.ndarray, sigma: float) -> np.ndarray:
+    """Gaussian blur of a 1-D signal (sigma in samples); the ends are extended, not faded."""
+    r = int(math.ceil(sigma * 3))
+    if r < 1:
+        return vals
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+    return np.convolve(np.pad(vals, r, mode="edge"), k / k.sum(), mode="valid")
 
 
 class Timeline(QWidget):
@@ -141,11 +200,21 @@ class Timeline(QWidget):
         self.wave_bps = DEFAULT_BPS
         self.wave_ref = 255.0
         self._drag: dict | None = None
+        self._hover_mid: str | None = None    # marker under the mouse: its name is shown
+        # x range being repainted: clips and markers outside it are skipped (a playhead step during
+        # playback repaints a strip a few pixels wide, which must not walk every clip and marker)
+        self._exposed: tuple[float, float] = (-math.inf, math.inf)
         self._drag_pos = QPointF()
         self._drag_alt = False
         self._moves: deque[tuple[float, float]] = deque()   # (time, x) of recent drag moves
         self._edge_speed = 0.0                              # current glide, view px/s (signed)
         self._edge_last = 0.0
+        # While the width keeps changing (a splitter or the window being dragged) the cached
+        # background is reused as it is and redrawn once the resize has paused.
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(RESIZE_SETTLE_MS)
+        self._resize_timer.timeout.connect(self.update)
         self._edge_timer = QTimer(self)
         self._edge_timer.setInterval(EDGE_TICK_MS)
         self._edge_timer.timeout.connect(self._edge_tick)
@@ -171,7 +240,8 @@ class Timeline(QWidget):
         bar = QWidget()
         bar.setObjectName("tl_zoom")
         bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        bar.setStyleSheet(f"#tl_zoom {{ background: {C_RULER.name()}; border-left: 1px solid {C_BG.name()}; }}")
+        t = theme.current()   # the theme's strings: QColor.name() would drop a translucent colour's alpha
+        bar.setStyleSheet(f"#tl_zoom {{ background: {t.ruler_bg}; border-left: 1px solid {t.timeline_bg}; }}")
         lay = QVBoxLayout(bar)
         lay.setContentsMargins(1, 1, 1, 1)
         lay.setSpacing(2)
@@ -432,7 +502,12 @@ class Timeline(QWidget):
         verbose = trace.is_verbose()
         if verbose:
             trace.vlog("paint", f"timeline begin rect={ev.rect().x()},{ev.rect().width()} pps={self.pps:.2f}")
-        self._paint()
+        r = ev.rect()
+        self._exposed = (r.left() - 2.0, r.right() + 2.0)
+        try:
+            self._paint()
+        finally:
+            self._exposed = (-math.inf, math.inf)
         if verbose:
             trace.vlog("paint", "timeline end")
 
@@ -444,7 +519,11 @@ class Timeline(QWidget):
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
                        tr("Open a video to see its timeline. Press I to start a clip, O to end it."))
             return
-        p.drawPixmap(0, 0, self._background())
+        bg = self._background()
+        p.drawPixmap(0, 0, bg)
+        spare = self.width() - bg.deviceIndependentSize().width()
+        if spare > 0:   # a stale background during a resize is narrower than the widget
+            p.fillRect(QRectF(self.width() - spare, 0, spare, self.height()), C_BG)
         self._paint_clips(p)
         self._paint_markers(p)
         self._paint_playhead(p)
@@ -455,9 +534,14 @@ class Timeline(QWidget):
         key = (self.width(), self.height(), round(dpr, 3), self.pps, self.scroll, self._row_sizes,
                self._thumb_version, id(self.wave), self.wave_ref, id(self.doc.index),
                self._lane_count, frozenset(self._lanes.values()))
+        old = self._bg_key
+        if (self._bg is not None and old is not None and self._resize_timer.isActive()
+                and key[1:3] == old[1:3] and key[5:] == old[5:]):
+            return self._bg   # only the width (and with it the fitted zoom / scroll) changed: mid-resize
         if key != self._bg_key or self._bg is None:
             pm = QPixmap(max(1, math.ceil(self.width() * dpr)), max(1, math.ceil(self.height() * dpr)))
             pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.GlobalColor.transparent)
             p = QPainter(pm)
             p.fillRect(QRectF(0, 0, self.width(), self.height()), C_BG)
             self._paint_thumbs(p)
@@ -518,6 +602,9 @@ class Timeline(QWidget):
         for f in range(f0, min(f1 + 1, idx.frame_count)):
             x = int(self.t2x(idx.time_of(f)))
             p.drawLine(x, top, x, bottom)
+
+    def _font_metrics(self, pt: int) -> QFontMetricsF:
+        return QFontMetricsF(self._font(pt))
 
     def _font(self, pt: int) -> QFont:
         f = self._fonts.get(pt)
@@ -588,28 +675,33 @@ class Timeline(QWidget):
         p.fillRect(0, y, self.width(), h, C_WAVE_BG)
         if self.wave is None or len(self.wave) == 0:
             return
-        x0, x1 = 0, self.width()
-        step = 1.0 / max(1.0, self.devicePixelRatioF())     # one sample per *device* pixel
-        xs, vals = self.wave_envelope(x0, x1, step)
+        dpr = self.devicePixelRatioF()
+        # Columns sit on a grid fixed in *time* (whole device pixels of the content, like the
+        # thumbnail tiles), so scrolling slides the same columns along; sampling at screen pixels
+        # re-picked every column's peak on each fractional scroll step and the outline shimmered.
+        origin = self.scroll * self.pps * dpr                 # content device px at the left edge
+        k0 = math.floor(origin)
+        sigma = WAVE_SMOOTH * dpr
+        pad = int(math.ceil(sigma * 3)) + 1
+        cols = math.ceil(self.width() * dpr) + 2 * pad + 1
+        x0 = (k0 - pad - origin) / dpr
+        xs, vals = self.wave_envelope(x0, x0 + (cols - 1) / dpr, 1.0 / dpr)
         # The waveform is symmetric, so only its upper half is drawn, rising from the bottom edge:
         # the full row height becomes amplitude (twice the detail of a mirrored drawing).
         base = y + h - 1
-        x = vals / self.wave_ref
+        x = smooth(vals, sigma) / self.wave_ref
         # linear up to the knee, then a smooth tanh shoulder that approaches (never hits) the top:
         # loud passages keep their shape instead of turning into a flat clipped band
         k = WAVE_KNEE
         y = np.where(x < k, x, k + (1 - k) * np.tanh((x - k) / (1 - k)))
         amp = np.clip(y, 0.0, 1.0) * (h - 3)
-        top = [QPointF(x, base - a) for x, a in zip(xs, amp)]
-        poly = QPolygonF(top + [QPointF(xs[-1], base), QPointF(xs[0], base)])
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(C_WAVE)
-        p.drawPolygon(poly)
-        p.setPen(QPen(C_WAVE.darker(140) if theme.current().name == "light" else C_WAVE.lighter(130), 0.8))
-        p.drawLine(QPointF(x0, base), QPointF(x1, base))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        img = wave_image(amp[pad:] * dpr, round(h * dpr), C_WAVE, WAVE_LINE_W * dpr)
+        img.setDevicePixelRatio(dpr)
+        p.drawImage(QPointF(round(x0 * dpr + pad) / dpr, base + 1 - h), img)
+        base_col = QColor(C_WAVE)
+        base_col.setAlpha(90)
+        p.setPen(QPen(base_col, 0.8))
+        p.drawLine(QPointF(0, base), QPointF(self.width(), base))
 
     def _paint_lanes(self, p: QPainter):
         """Clip-lane area: one stripe per lane in use (an empty project shows one with a hint)."""
@@ -636,7 +728,7 @@ class Timeline(QWidget):
                 x0 = self.t2x(self.doc.time_of(pin))
                 x1 = self.t2x(self.doc.time_of(pout)) if pout is not None else r.right()
                 r = QRectF(x0, r.y(), max(2.0, x1 - x0), r.height())
-            if r.right() < 0 or r.left() > self.width():
+            if r.right() < max(0.0, self._exposed[0]) or r.left() > min(self.width(), self._exposed[1]):
                 continue
             col = QColor(c.color or "#4f9dff")
             fill = QColor(col)
@@ -653,10 +745,13 @@ class Timeline(QWidget):
             self._paint_edge_brackets(p, r, col, c.out_frame is not None, edge == "out")
             label = c.name + ("  🔇" if c.muted else "") + ("  CC" if c.burn_subs else "")
             if r.width() > 30:
-                p.setPen(C_CLIP_TEXT)
-                p.setFont(self._font(11))
-                p.drawText(r.adjusted(10, 0, -10, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                           label)
+                # shortened with "…" rather than cut off inside a letter; nothing when not even that fits
+                text = self._font_metrics(11).elidedText(label, Qt.TextElideMode.ElideRight, r.width() - 20)
+                if text and text != "…":
+                    p.setPen(C_CLIP_TEXT)
+                    p.setFont(self._font(11))
+                    p.drawText(r.adjusted(10, 0, -10, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                               text)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     def _paint_edge_brackets(self, p: QPainter, r: QRectF, col: QColor, closed: bool,
@@ -678,7 +773,7 @@ class Timeline(QWidget):
         p.setBrush(Qt.BrushStyle.NoBrush)
         if r.width() > 140:  # explicit tags only when the clip is wide enough to read them
             p.setFont(self._font(8))
-            p.setPen(solid.lighter(150) if theme.current().name == "dark" else solid.darker(160))
+            p.setPen(solid.lighter(150) if theme.current().dark else solid.darker(160))
             flags = Qt.AlignmentFlag.AlignVCenter
             p.drawText(r.adjusted(0, 0, -10, 0), flags | Qt.AlignmentFlag.AlignRight,
                        tr("Out") if closed and not out_follows else "…")
@@ -686,44 +781,90 @@ class Timeline(QWidget):
     def _paint_markers(self, p: QPainter):
         sel = set(self.doc.selected_markers)
         for m in self.doc.project.markers:
+            if m.hidden:
+                continue
             frame = m.frame
             if self._drag and self._drag.get("mid") == m.id and "preview" in self._drag:
                 frame = self._drag["preview"]
             x = self.t2x(self.doc.time_of(frame))
             if x < -10 or x > self.width() + 10:
                 continue
-            col = QColor(m.color or C_MARKER)
             selected = m.id in sel
-            p.setPen(QPen(col, 2 if selected else 1, Qt.PenStyle.DashLine))
-            p.drawLine(int(x), RULER_H, int(x), self.height())
-            flag = QPolygonF([QPointF(x, 1), QPointF(x + 12, 8), QPointF(x, 15)])
+            reach = MARKER_TAG_W
+            if m.label and (m.id == self._hover_mid or selected):
+                reach += 5 + self._font_metrics(8).horizontalAdvance(m.label)   # the name, on either side
+            if x + reach < self._exposed[0] or x - reach > self._exposed[1]:
+                continue
+            col = QColor(m.color or C_MARKER)
+            # a small tag in the tick zone of the ruler (below the time labels) whose point sits on
+            # the top of the marker line; both share one centre snapped to device pixels
+            cx, lw = self._snap_line(x, 2 if selected else 1)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            pen = QPen(col, lw, Qt.PenStyle.DashLine)
+            pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            p.setPen(pen)
+            p.drawLine(QPointF(cx, RULER_H), QPointF(cx, self.height()))
+            top, mid = RULER_H - MARKER_TAG_H, RULER_H - MARKER_TAG_W / 2
+            tag = QPolygonF([QPointF(cx - MARKER_TAG_W / 2, top), QPointF(cx + MARKER_TAG_W / 2, top),
+                             QPointF(cx + MARKER_TAG_W / 2, mid), QPointF(cx, RULER_H),
+                             QPointF(cx - MARKER_TAG_W / 2, mid)])
             p.setBrush(col)  # the marker keeps its own colour; selection = white outline
-            p.setPen(QPen(QColor("#ffffff"), 2) if selected else Qt.PenStyle.NoPen)
-            p.drawPolygon(flag)
-            if m.label:
-                p.setFont(self._font(9))
+            p.setPen(QPen(C_OUTLINE, 1.5) if selected else Qt.PenStyle.NoPen)
+            p.drawPolygon(tag)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            if m.label and (m.id == self._hover_mid or selected):
+                # Names only for the marker under the mouse and the selected ones (all of them are in
+                # the Markers tab): on a ruler-coloured backing so the ticks don't run through the text,
+                # on the left of the tag when there is no room on the right.
+                p.setFont(self._font(8))
+                tw = p.fontMetrics().horizontalAdvance(m.label)
+                tx = cx + MARKER_TAG_W / 2 + 3
+                if tx + tw > self.width() and cx - MARKER_TAG_W / 2 - 3 - tw >= 0:
+                    tx = cx - MARKER_TAG_W / 2 - 3 - tw
+                p.fillRect(QRectF(tx - 2, top, tw + 4, MARKER_TAG_H - 1), C_RULER)
                 p.setPen(col)
-                p.drawText(int(x) + 14, 13, m.label)
+                p.drawText(QPointF(tx, RULER_H - 3), m.label)
         p.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _snap_line(self, x: float, width: float) -> tuple[float, float]:
+        """Centre and width (logical px) of a vertical line `width` px wide that covers whole device
+        pixels, so an antialiased line stays crisp and shapes centred on it line up exactly at any
+        display scaling."""
+        dpr = self.devicePixelRatioF()
+        wd = max(1, round(width * dpr))
+        return (math.floor(x * dpr) + wd / 2) / dpr, wd / dpr
 
     def _paint_playhead(self, p: QPainter):
         x = self.t2x(self.position)
         if x < -5 or x > self.width() + 5:
             return
-        p.setPen(QPen(C_PLAYHEAD, 1))
-        p.drawLine(int(x), 0, int(x), self.height())
+        # A 2 px solid line under a head in the upper part of the ruler (markers are dashed, 1 px,
+        # with their tags below the time labels). Nothing is drawn at y < 1: at fractional display
+        # scaling (125 %, 150 %…) the widget's first device row can be shared with the widget above
+        # and is left out of the partial repaints in _update_playhead, so it kept a red trace.
+        cx, lw = self._snap_line(x, PLAYHEAD_W)
+        hw = PLAYHEAD_HEAD_W / 2
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(C_PLAYHEAD, lw)
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        p.setPen(pen)
+        p.drawLine(QPointF(cx, PLAYHEAD_HEAD_H - 1), QPointF(cx, self.height()))
         p.setBrush(C_PLAYHEAD)
         p.setPen(Qt.PenStyle.NoPen)
-        p.drawPolygon(QPolygonF([QPointF(x - 6, 0), QPointF(x + 6, 0), QPointF(x, 8)]))
+        p.drawPolygon(QPolygonF([QPointF(cx - hw, 1), QPointF(cx + hw, 1), QPointF(cx + hw, PLAYHEAD_HEAD_H - hw),
+                                 QPointF(cx, PLAYHEAD_HEAD_H), QPointF(cx - hw, PLAYHEAD_HEAD_H - hw)]))
         p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     # ---- hit testing & snapping ---------------------------------------------------------
     def _hit(self, pos: QPointF) -> dict:
         x, y = pos.x(), pos.y()
         if y < RULER_H:
             for m in reversed(self.doc.project.markers):
+                if m.hidden:
+                    continue
                 mx = self.t2x(m.time)
-                if mx - 3 <= x <= mx + 13 and y <= 17:
+                if abs(x - mx) <= MARKER_TAG_W / 2 + 2 and y >= RULER_H - MARKER_TAG_H - 2:
                     return {"kind": "marker", "mid": m.id}
             return {"kind": "ruler"}
         for c in reversed(self.doc.project.clips):
@@ -736,7 +877,7 @@ class Timeline(QWidget):
                 if r.left() <= x <= r.right():
                     return {"kind": "clip", "cid": c.id}
         for m in self.doc.project.markers:
-            if abs(self.t2x(m.time) - x) <= 3:
+            if not m.hidden and abs(self.t2x(m.time) - x) <= 3:
                 return {"kind": "marker", "mid": m.id}
         return {"kind": "empty"}
 
@@ -748,7 +889,7 @@ class Timeline(QWidget):
             return f
         best, best_d = f, SNAP_PX + 1
         cands = [idx.frame_at(self.position)]
-        cands += [m.frame for m in self.doc.project.markers if m.id != exclude_mid]
+        cands += [m.frame for m in self.doc.project.markers if m.id != exclude_mid and not m.hidden]
         for c in self.doc.project.clips:
             if c.id != exclude_cid:
                 cands.append(c.in_frame)
@@ -793,7 +934,8 @@ class Timeline(QWidget):
         elif kind == "marker":
             m = self.doc.project.marker_by_id(hit["mid"])
             self.doc.select_markers([m.id])
-            self._drag = {"kind": "marker", "mid": m.id, "preview": m.frame, "x": ev.position().x()}
+            self._drag = {"kind": "marker", "mid": m.id, "preview": m.frame, "x": ev.position().x(),
+                          "moved": False}
         else:
             if not ctrl:
                 self.doc.clear_selection()
@@ -872,6 +1014,9 @@ class Timeline(QWidget):
                            f"{fmt_time(self.doc.time_of(pout)) if pout is not None else '…'}")
             self.update()
         elif kind == "marker":
+            if not d["moved"] and abs(pos.x() - d["x"]) < CLICK_PX:
+                return   # still a click: it jumps to the marker on release
+            d["moved"] = True
             d["preview"] = self._snap_frame(x, exclude_mid=d["mid"], no_snap=no_snap)
             self.update()
 
@@ -956,7 +1101,14 @@ class Timeline(QWidget):
                 if fields:
                     self.doc.set_clip_fields(c.id, fields, tr("Move clip edge"))
         elif d["kind"] == "marker":
-            self.doc.move_marker(d["mid"], d["preview"])
+            m = self.doc.project.marker_by_id(d["mid"])
+            if m is not None and not d["moved"]:
+                # click on a marker: go to it
+                t = self.doc.time_of(m.frame)
+                self.set_position(t, follow=True, margin=0)
+                self.seek_requested.emit(t)
+            else:
+                self.doc.move_marker(d["mid"], d["preview"])
         elif d["kind"] == "pan":
             # The drag moved the view live; record start -> end as a single undoable step.
             v = self.doc.project.view
@@ -977,16 +1129,22 @@ class Timeline(QWidget):
             self.position = t
             self.seek_requested.emit(t)
 
+    def _set_hover_marker(self, mid: str | None) -> None:
+        if mid != self._hover_mid:
+            self._hover_mid = mid
+            self.update(0, 0, self.width(), RULER_H)
+
     def _update_hover(self, pos: QPointF):
         hit = self._hit(pos)
         k = hit["kind"]
+        self._set_hover_marker(hit.get("mid"))
         if k in ("clip_in", "clip_out"):
             self.setCursor(Qt.CursorShape.SizeHorCursor)
             self.hint.emit(tr("Click — go to this clip edge · drag — move it · Alt — no snapping · "
                               "right click — change it with the playhead"))
         elif k == "marker":
             self.setCursor(Qt.CursorShape.SizeHorCursor)
-            self.hint.emit(tr("Drag to move the marker · Del — delete"))
+            self.hint.emit(tr("Click: go to the marker · drag to move it · Del — delete"))
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
             if self.doc.has_video:
@@ -996,6 +1154,7 @@ class Timeline(QWidget):
                                + tr("Ctrl+wheel — zoom · wheel — scroll · click — seek · right click — menu"))
 
     def leaveEvent(self, _ev):
+        self._set_hover_marker(None)
         self.hint.emit("")
 
     def wheelEvent(self, ev):
@@ -1011,6 +1170,8 @@ class Timeline(QWidget):
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
+        if ev.oldSize().height() == ev.size().height() and ev.oldSize().width() > 0:
+            self._resize_timer.start()
         self.update()
 
     def contextMenuEvent(self, ev):

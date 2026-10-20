@@ -113,7 +113,7 @@ class AppSettings:
     output_dir: str = ""
     language: str = "en"
     ui_scale: str = "auto"          # auto | 1.0 | 1.25 | 1.5 | 1.75 | 2.0 (applied at start)
-    theme: str = "dark"             # dark | light | system (applied at start)
+    theme: str = "steel"            # a key of ui.theme.THEMES, or system (applied at start)
     thumb_quality: str = "auto"     # auto | 72 | 108 | 144 | 216  (thumbnail height in pixels)
     wave_quality: str = "auto"      # auto | 100 | 200 | 400 | 800 (waveform points per second)
     preferred_audio_langs: list[str] = field(default_factory=lambda: ["jpn", "ja"])
